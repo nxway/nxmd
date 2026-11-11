@@ -11,6 +11,9 @@ $text = "# Windows smoke test`r`n`r`n**Native** Markdown with 日本語.`r`n"
 $before = (Get-FileHash $note -Algorithm SHA256).Hash
 @{vault=$vault.FullName; tabs=@('Smoke.md'); active=0; recent=@()} | ConvertTo-Json | Set-Content (Join-Path $config 'session.json') -Encoding utf8NoBOM
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -58,11 +61,29 @@ function Cancel-Dialog {
     [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
     Wait-DialogClosed
 }
-function Select-Path([string]$path) {
-    [System.Windows.Forms.SendKeys]::SendWait('%n')
-    [System.Windows.Forms.SendKeys]::SendWait('^a')
-    [System.Windows.Forms.SendKeys]::SendWait($path)
-    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+function Invoke-DialogButton([string]$name) {
+    $h=Wait-Dialog
+    $element=[System.Windows.Automation.AutomationElement]::FromHandle($h)
+    $condition=[System.Windows.Automation.AndCondition]::new(
+        [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button),
+        [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$name))
+    $button=$element.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$condition)
+    if (!$button) { throw "Native dialog button missing: $name" }
+    $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+}
+function Select-Path([string]$path, [bool]$folder=$false) {
+    if ($folder) {
+        [System.Windows.Forms.SendKeys]::SendWait('^l')
+        [System.Windows.Forms.SendKeys]::SendWait($path)
+        [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+        Start-Sleep -Milliseconds 800
+        Invoke-DialogButton 'Open vault'
+    } else {
+        [System.Windows.Forms.SendKeys]::SendWait('%n')
+        [System.Windows.Forms.SendKeys]::SendWait('^a')
+        [System.Windows.Forms.SendKeys]::SendWait($path)
+        Invoke-DialogButton 'Save'
+    }
     Wait-DialogClosed
 }
 $originalLocalAppData = $env:LOCALAPPDATA
@@ -86,7 +107,7 @@ try {
     $mainWindow=$process.MainWindowHandle
     # Exercise real native dialogs from GPUI event handlers, including cancel and accept.
     Open-Dialog '^o'; Cancel-Dialog
-    Open-Dialog '^o'; Select-Path $vault.FullName
+    Open-Dialog '^o'; Select-Path $vault.FullName $true
     Open-Dialog '^n'; Cancel-Dialog
     Open-Dialog '^n'; Select-Path (Join-Path $vault 'Created.md')
     if (!(Test-Path (Join-Path $vault 'Created.md'))) { throw 'New note dialog did not create the selected file' }
@@ -115,6 +136,19 @@ try {
     if (!$panicLogs.Contains('nxmd diagnostic self-test') -or !$panicLogs.Contains('PANIC:')) { throw 'Persistent panic log was not written' }
     'PASS: native dialogs opened/cancelled; Open vault and New note accepted; all six dialog callbacks completed; note preserved; clean shutdown; persistent panic log verified.'  | Tee-Object (Join-Path $resultDir 'result.txt')
 } catch {
+    if ($process -and !$process.HasExited) {
+        $h=[NativeSmoke]::Dialog($process.Id)
+        if ($h -ne [IntPtr]::Zero) {
+            $element=[System.Windows.Automation.AutomationElement]::FromHandle($h)
+            $element.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition) | ForEach-Object { "$($_.Current.ControlType.ProgrammaticName) id=$($_.Current.AutomationId) name=$($_.Current.Name)" } | Set-Content (Join-Path $resultDir 'dialog-controls.txt')
+        }
+        $bounds=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+        $bitmap=[System.Drawing.Bitmap]::new($bounds.Width,$bounds.Height)
+        $graphics=[System.Drawing.Graphics]::FromImage($bitmap)
+        $graphics.CopyFromScreen($bounds.Location,[System.Drawing.Point]::Empty,$bounds.Size)
+        $bitmap.Save((Join-Path $resultDir.FullName 'failure.png'))
+        $graphics.Dispose(); $bitmap.Dispose()
+    }
     "FAIL: $($_.Exception.Message)" | Tee-Object (Join-Path $resultDir 'result.txt')
     throw
 } finally {
