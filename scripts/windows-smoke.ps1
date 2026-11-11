@@ -23,6 +23,8 @@ public static class NativeSmoke {
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
@@ -63,13 +65,13 @@ function Cancel-Dialog {
 }
 function Invoke-DialogButton([string]$name) {
     $h=Wait-Dialog
-    $element=[System.Windows.Automation.AutomationElement]::FromHandle($h)
-    $condition=[System.Windows.Automation.AndCondition]::new(
-        [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button),
-        [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$name))
-    $button=$element.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$condition)
-    if (!$button) { throw "Native dialog button missing: $name" }
-    $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $button=[NativeSmoke]::GetDlgItem($h,1)
+    if ($button -eq [IntPtr]::Zero) { throw 'Native dialog confirmation control missing' }
+    $label=[Text.StringBuilder]::new(256)
+    [void][NativeSmoke]::GetWindowText($button,$label,256)
+    if ($label.ToString().Replace('&','') -ne $name) { throw "Unexpected confirmation label: $label (expected $name)" }
+    [void][NativeSmoke]::SendMessage($button,0xF5,[IntPtr]::Zero,[IntPtr]::Zero)
+
 }
 function Select-Path([string]$path, [bool]$folder=$false) {
     if ($folder) {

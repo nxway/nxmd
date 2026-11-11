@@ -1,0 +1,39 @@
+name: Windows dialog regression
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Successful release-build run whose executable will be tested
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+jobs:
+  dialogs:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+          pattern: nxmd-windows-x64-*
+          merge-multiple: true
+          path: release-under-test
+      - name: Record executable provenance
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force smoke-results | Out-Null
+          Copy-Item release-under-test/commit.txt smoke-results/executable-commit.txt
+          Get-FileHash release-under-test/nxmd.exe -Algorithm SHA256 | Out-String | Set-Content smoke-results/executable-sha256.txt
+      - name: Exercise native dialogs
+        shell: pwsh
+        run: ./scripts/windows-smoke.ps1 -Executable ./release-under-test/nxmd.exe
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-dialog-regression-${{ github.run_id }}
+          path: smoke-results/
+          if-no-files-found: error
