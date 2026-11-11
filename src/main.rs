@@ -1,8 +1,13 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+mod diagnostics;
 mod theme;
 mod ui;
 use gpui::*;
 fn main() {
+    diagnostics::init();
+    if std::env::args().any(|a| a == "--test-panic-log") {
+        panic!("nxmd diagnostic self-test");
+    }
     gpui_platform::application().run(|cx| {
         zorite_editor::bind_keys(cx);
         cx.bind_keys([

@@ -17,7 +17,15 @@ struct Tab {
     conflict: bool,
     _subscription: Subscription,
 }
+#[derive(Clone, Copy, Debug)]
+enum NewPath {
+    Note,
+    Folder,
+    Copy,
+    Move,
+}
 pub struct Workspace {
+    dialog_busy: bool,
     sidebar: bool,
     vault: Option<Vault>,
     tabs: Vec<Tab>,
@@ -63,6 +71,7 @@ impl Workspace {
         let paths = session.tabs.clone();
         let active = session.active;
         let mut app = Self {
+            dialog_busy: false,
             sidebar: true,
             vault,
             tabs: vec![],
@@ -258,29 +267,62 @@ impl Workspace {
             cx.notify();
         }
     }
-    fn open_vault(&mut self, _: &OpenVault, _: &mut Window, cx: &mut Context<Self>) {
+    fn open_vault(&mut self, _: &OpenVault, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_busy {
+            return;
+        }
         for i in 0..self.tabs.len() {
             if self.tabs[i].dirty.is_some() && !self.save_tab(i, cx) {
                 return;
             }
         }
-        if let Some(p) = rfd::FileDialog::new().pick_folder() {
-            match Vault::open(&p) {
-                Ok(v) => {
-                    self.vault = Some(v);
-                    self.tabs.clear();
-                    self.active = 0;
-                    self.expanded.clear();
-                    self.session.recent.retain(|r| r != &p);
-                    self.session.recent.insert(0, p);
-                    self.session.recent.truncate(10);
-                    self.refresh();
-                    self.persist();
+        self.dialog_busy = true;
+        log::info!("dialog open-vault requested");
+        let result = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open vault".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = result.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.dialog_busy = false;
+                log::info!("dialog open-vault completed");
+                match result {
+                    Ok(Some(paths)) => {
+                        if let Some(p) = paths.first() {
+                            for i in 0..this.tabs.len() {
+                                if this.tabs[i].dirty.is_some() && !this.save_tab(i, cx) {
+                                    return;
+                                }
+                            }
+                            match Vault::open(p) {
+                                Ok(v) => {
+                                    this.vault = Some(v);
+                                    this.tabs.clear();
+                                    this.active = 0;
+                                    this.expanded.clear();
+                                    this.session.recent.retain(|r| r != p);
+                                    this.session.recent.insert(0, p.clone());
+                                    this.session.recent.truncate(10);
+                                    this.refresh();
+                                    this.persist();
+                                }
+                                Err(e) => this.status = e.to_string(),
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        log::error!("open-vault dialog: {e}");
+                        this.status = e.to_string();
+                    }
                 }
-                Err(e) => self.status = e.to_string(),
-            }
-        }
-        cx.notify();
+                cx.notify();
+            });
+        })
+        .detach();
     }
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.is_empty() {
@@ -301,142 +343,155 @@ impl Workspace {
         self.sidebar = !self.sidebar;
         cx.notify();
     }
-    fn new_folder(&mut self, cx: &mut Context<Self>) {
-        let Some(v) = &self.vault else {
-            return;
-        };
-        if let Some(p) = rfd::FileDialog::new()
-            .set_title("Create folder")
-            .set_directory(&v.root)
-            .set_file_name("New folder")
-            .save_file()
-        {
-            let result = (|| -> anyhow::Result<()> { v.create(p.strip_prefix(&v.root)?, true) })();
-            match result {
-                Ok(()) => self.refresh(),
-                Err(e) => self.status = e.to_string(),
-            }
-        }
-        cx.notify();
+    fn new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_path(NewPath::Folder, window, cx);
     }
     fn save_copy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(t) = self.tabs.get(self.active) else {
-            return;
-        };
-        let Some(v) = &self.vault else {
-            return;
-        };
-        if let Some(p) = rfd::FileDialog::new()
-            .set_directory(&v.root)
-            .set_file_name("Recovered.md")
-            .save_file()
-        {
-            let text = t.editor.read(cx).text().to_owned();
-            let result = (|| -> anyhow::Result<PathBuf> {
-                let rel = p.strip_prefix(&v.root)?.to_path_buf();
-                v.create(&rel, false)?;
-                let mut doc = v.load(&rel)?;
-                doc.text = text;
-                v.save(&mut doc)?;
-                Ok(rel)
-            })();
-            match result {
-                Ok(p) => {
-                    self.refresh();
-                    self.open(p, window, cx);
-                }
-                Err(e) => self.status = e.to_string(),
-            }
-        }
-        cx.notify();
+        self.new_path(NewPath::Copy, window, cx);
     }
     fn move_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.is_empty() || !self.save_tab(self.active, cx) {
-            return;
-        }
-        let v = self.vault.as_ref().unwrap();
-        let old = self.tabs[self.active].doc.path.clone();
-        if let Some(p) = rfd::FileDialog::new()
-            .set_directory(&v.root)
-            .set_file_name(old.file_name().unwrap().to_string_lossy())
-            .save_file()
-        {
-            let result = (|| -> anyhow::Result<PathBuf> {
-                let rel = p.strip_prefix(&v.root)?.to_path_buf();
-                v.move_note(&old, &rel)?;
-                Ok(rel)
-            })();
-            match result {
-                Ok(p) => {
-                    self.tabs.remove(self.active);
-                    self.active = 0;
-                    self.open(p, window, cx);
-                    self.refresh();
-                    self.persist();
-                }
-                Err(e) => self.status = e.to_string(),
-            }
-        }
-        cx.notify();
-    }
-    fn trash_note(&mut self, cx: &mut Context<Self>) {
-        if self.tabs.is_empty() || !self.save_tab(self.active, cx) {
-            return;
-        }
-        if rfd::MessageDialog::new()
-            .set_title("Move note to recovery folder?")
-            .set_description("The file will be retained in .nxmd-trash inside your vault.")
-            .set_buttons(rfd::MessageButtons::OkCancel)
-            .show()
-            != rfd::MessageDialogResult::Ok
-        {
-            return;
-        }
-        match self
-            .vault
-            .as_ref()
-            .unwrap()
-            .trash(&self.tabs[self.active].doc.path)
-        {
-            Ok(_) => {
-                self.tabs.remove(self.active);
-                self.active = self.active.min(self.tabs.len().saturating_sub(1));
-                self.refresh();
-                self.persist();
-            }
-            Err(e) => self.status = e.to_string(),
-        }
-        cx.notify();
+        self.new_path(NewPath::Move, window, cx);
     }
     fn new_note(&mut self, _: &NewNote, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(v) = &self.vault else {
+        self.new_path(NewPath::Note, window, cx);
+    }
+    fn new_path(&mut self, kind: NewPath, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_busy {
+            return;
+        }
+        if matches!(kind, NewPath::Move)
+            && (self.tabs.is_empty() || !self.save_tab(self.active, cx))
+        {
+            return;
+        }
+        let Some(vault) = self.vault.clone() else {
             self.status = "Open a vault first (Ctrl+O)".into();
             cx.notify();
             return;
         };
-        if let Some(path) = rfd::FileDialog::new()
-            .set_directory(&v.root)
-            .set_file_name("Untitled.md")
-            .add_filter("Markdown", &["md"])
-            .save_file()
-        {
-            let result = path
-                .strip_prefix(&v.root)
-                .map(Path::to_path_buf)
-                .map_err(anyhow::Error::from)
-                .and_then(|p| {
-                    v.create(&p, false)?;
-                    Ok(p)
-                });
-            match result {
-                Ok(p) => {
-                    self.refresh();
-                    self.open(p, window, cx);
-                }
-                Err(e) => self.status = e.to_string(),
-            }
+        let tab = self.tabs.get(self.active);
+        if matches!(kind, NewPath::Move | NewPath::Copy) && tab.is_none() {
+            return;
         }
-        cx.notify();
+        let old = tab.map(|t| t.doc.path.clone());
+        let text = tab
+            .map(|t| t.editor.read(cx).text().to_owned())
+            .unwrap_or_default();
+        let suggested = match kind {
+            NewPath::Folder => "New folder".into(),
+            NewPath::Note => "Untitled.md".into(),
+            NewPath::Copy => "Recovered.md".into(),
+            NewPath::Move => old
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        self.dialog_busy = true;
+        log::info!("dialog {kind:?} requested");
+        let result = cx.prompt_for_new_path(&vault.root, Some(&suggested));
+        cx.spawn_in(window, async move |this, cx| {
+            let result = result.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.dialog_busy = false;
+                log::info!("dialog {kind:?} completed");
+                let result = (|| -> anyhow::Result<()> {
+                    let Some(path) = result? else {
+                        return Ok(());
+                    };
+                    if this.vault.as_ref().map(|v| &v.root) != Some(&vault.root) {
+                        anyhow::bail!("Vault changed while dialog was open");
+                    }
+                    let rel = path.strip_prefix(&vault.root)?.to_path_buf();
+                    match kind {
+                        NewPath::Folder => vault.create(&rel, true)?,
+                        NewPath::Note => {
+                            vault.create(&rel, false)?;
+                            this.open(rel, window, cx);
+                        }
+                        NewPath::Copy => {
+                            vault.create(&rel, false)?;
+                            let mut doc = vault.load(&rel)?;
+                            doc.text = text;
+                            vault.save(&mut doc)?;
+                            this.open(rel, window, cx);
+                        }
+                        NewPath::Move => {
+                            let old = old.unwrap();
+                            let i = this
+                                .tabs
+                                .iter()
+                                .position(|t| t.doc.path == old)
+                                .ok_or_else(|| anyhow::anyhow!("Source tab closed"))?;
+                            if !this.save_tab(i, cx) {
+                                return Ok(());
+                            }
+                            vault.move_note(&old, &rel)?;
+                            this.tabs.remove(i);
+                            this.active = 0;
+                            this.open(rel, window, cx);
+                        }
+                    }
+                    this.refresh();
+                    this.persist();
+                    Ok(())
+                })();
+                if let Err(e) = result {
+                    log::error!("dialog operation failed: {e}");
+                    this.status = e.to_string();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    fn trash_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_busy || self.tabs.is_empty() || !self.save_tab(self.active, cx) {
+            return;
+        }
+        let path = self.tabs[self.active].doc.path.clone();
+        let vault = self.vault.clone().unwrap();
+        self.dialog_busy = true;
+        log::info!("dialog trash requested");
+        let result = window.prompt(
+            PromptLevel::Warning,
+            "Move note to recovery folder?",
+            Some("The file will be retained in .nxmd-trash inside your vault."),
+            &[
+                PromptButton::ok("Move to trash"),
+                PromptButton::cancel("Cancel"),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let result = result.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.dialog_busy = false;
+                log::info!("dialog trash completed");
+                if matches!(result, Ok(0))
+                    && this.vault.as_ref().map(|v| &v.root) == Some(&vault.root)
+                {
+                    if let Some(i) = this.tabs.iter().position(|t| t.doc.path == path) {
+                        if !this.save_tab(i, cx) {
+                            return;
+                        }
+                        match vault.trash(&path) {
+                            Ok(_) => {
+                                this.tabs.remove(i);
+                                this.active = this.active.min(this.tabs.len().saturating_sub(1));
+                                this.refresh();
+                                this.persist();
+                            }
+                            Err(e) => this.status = e.to_string(),
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 impl Render for Workspace {
@@ -577,7 +632,7 @@ impl Render for Workspace {
                                     .py_2()
                                     .cursor_pointer()
                                     .child("New folder")
-                                    .on_click(cx.listener(|s, _, _, cx| s.new_folder(cx))),
+                                    .on_click(cx.listener(|s, _, w, cx| s.new_folder(w, cx))),
                             )
                             .child(
                                 div()
@@ -604,7 +659,7 @@ impl Render for Workspace {
                                     .py_2()
                                     .cursor_pointer()
                                     .child("Move note to trash")
-                                    .on_click(cx.listener(|s, _, _, cx| s.trash_note(cx))),
+                                    .on_click(cx.listener(|s, _, w, cx| s.trash_note(w, cx))),
                             )
                             .child(
                                 div()
