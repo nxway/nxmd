@@ -1,0 +1,36 @@
+[package]
+name = "nxmd"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[features]
+default = ["desktop"]
+desktop = ["dep:gpui", "dep:gpui_platform", "dep:zorite-editor", "dep:rfd"]
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+percent-encoding = "2"
+gpui = { package = "gpui-pre", version = "0.3", optional = true }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3", features = ["font-kit", "wayland", "x11", "runtime_shaders"], optional = true }
+zorite-editor = { version = "=0.11.3", optional = true }
+rfd = { version = "0.17", optional = true }
+
+[[bin]]
+name = "nxmd"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[patch.crates-io]
+zorite-editor = { path = "vendor/zorite-editor" }

@@ -1,0 +1,54 @@
+name: Windows release
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Record runner and compiler
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          rustc -Vv | Tee-Object artifacts/toolchain.txt
+          cargo -V | Tee-Object -Append artifacts/toolchain.txt
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, OSArchitecture | Out-String | Tee-Object -Append artifacts/toolchain.txt
+          git rev-parse HEAD | Set-Content artifacts/commit.txt
+      - name: Test filesystem and preservation on Windows
+        run: cargo test --locked --no-default-features
+      - name: Build native release executable
+        run: cargo build --locked --release
+      - name: Inspect native dependencies and package executable
+        shell: pwsh
+        run: ./scripts/windows-package.ps1
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: nxmd-windows-x64-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Native window smoke test
+        shell: pwsh
+        timeout-minutes: 3
+        run: ./scripts/windows-smoke.ps1 -Executable ./target/release/nxmd.exe
+      - name: Upload smoke-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nxmd-windows-validation-${{ github.sha }}
+          path: smoke-results/
+          if-no-files-found: warn
+          retention-days: 30
