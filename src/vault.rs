@@ -22,7 +22,7 @@ pub struct Document {
 }
 impl Vault {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        let root = root.as_ref().canonicalize()?;
+        let root = dunce::canonicalize(root.as_ref())?;
         if !root.is_dir() {
             bail!("Vault must be a directory");
         }
@@ -55,7 +55,7 @@ impl Vault {
         while !parent.exists() {
             parent = parent.parent().context("Invalid path")?;
         }
-        if !parent.canonicalize()?.starts_with(&self.root) {
+        if !dunce::canonicalize(parent)?.starts_with(&self.root) {
             bail!("Symlink escapes vault");
         }
         Ok(path)

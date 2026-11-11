@@ -49,3 +49,20 @@ fn symlink_escape_rejected() -> anyhow::Result<()> {
     assert!(v.create(Path::new("link/escape.md"), false).is_err());
     Ok(())
 }
+
+#[cfg(windows)]
+#[test]
+fn native_dialog_paths_match_vault_root() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    // std canonicalize uses the verbatim Windows prefix; dialogs generally don't.
+    let verbatim = dir.path().canonicalize()?;
+    let v = Vault::open(&verbatim)?;
+    let dialog_destination = dunce::canonicalize(dir.path())?.join("new.md");
+    let relative = dialog_destination.strip_prefix(&v.root)?;
+    v.create(relative, false)?;
+    let mut doc = v.load(relative)?;
+    doc.text = "# 日本語\r\n".into();
+    v.save(&mut doc)?;
+    assert_eq!(fs::read_to_string(dialog_destination)?, doc.text);
+    Ok(())
+}

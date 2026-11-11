@@ -3235,6 +3235,7 @@ name = "nxmd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dunce",
  "gpui-pre",
  "gpui-pre-platform",
  "image",

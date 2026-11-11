@@ -49,7 +49,7 @@ pub fn resolve(v: &Vault, note: &Path, src: &str) -> Result<PathBuf> {
     }
     let base = v.root.join(note.parent().unwrap_or(Path::new("")));
     for p in [base.join(src.as_ref()), v.root.join(src.as_ref())] {
-        if let Ok(p) = p.canonicalize() {
+        if let Ok(p) = dunce::canonicalize(&p) {
             if p.starts_with(&v.root) {
                 v.resolve(p.strip_prefix(&v.root)?)?;
                 return Ok(p);
