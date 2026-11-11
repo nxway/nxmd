@@ -67,10 +67,15 @@ mod tests {
         let v = Vault::open(d.path())?;
         std::fs::create_dir(d.path().join("nested"))?;
         std::fs::write(d.path().join("a b.png"), b"test")?;
+        std::fs::write(d.path().join("nested/a b.png"), b"wrong image")?;
+        let resolved = resolve(&v, Path::new("nested/n.md"), "../a%20b.png")?;
+        // Windows TEMP may use an 8.3 alias while resolve returns a long path.
+        // Compare filesystem-normalized paths, not their original spellings.
         assert_eq!(
-            resolve(&v, Path::new("nested/n.md"), "../a%20b.png")?,
-            d.path().join("a b.png")
+            dunce::canonicalize(&resolved)?,
+            dunce::canonicalize(d.path().join("a b.png"))?
         );
+        assert_eq!(std::fs::read(resolved)?, b"test");
         assert!(resolve(&v, Path::new("n.md"), "https://example.com/a.png").is_err());
         Ok(())
     }
