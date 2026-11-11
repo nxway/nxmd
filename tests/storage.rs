@@ -34,7 +34,7 @@ fn image_import_does_not_overwrite() -> anyhow::Result<()> {
 fn windows_aliases_are_rejected() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let v = Vault::open(dir.path())?;
-    for path in [".obsidian./config", "a.md:stream", "folder\\escape.md"] {
+    for path in [".obsidian./config", "a.md:stream", "../escape.md"] {
         assert!(v.resolve(Path::new(path)).is_err(), "{path}");
     }
     Ok(())
@@ -64,5 +64,96 @@ fn native_dialog_paths_match_vault_root() -> anyhow::Result<()> {
     doc.text = "# 日本語\r\n".into();
     v.save(&mut doc)?;
     assert_eq!(fs::read_to_string(dialog_destination)?, doc.text);
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_nested_paths_and_dot_normalization() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let v = Vault::open(dir.path())?;
+    v.create(Path::new("folder"), true)?;
+    v.create(Path::new(r"folder\note.md"), false)?;
+    for path in [r"folder\note.md", "folder/note.md", r".\folder\.\note.md"] {
+        assert_eq!(
+            dunce::canonicalize(v.resolve(Path::new(path))?)?,
+            dunce::canonicalize(dir.path().join("folder/note.md"))?
+        );
+        assert_eq!(v.load(Path::new(path))?.text, "");
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_traversal_prefixes_and_protected_paths_are_rejected() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let v = Vault::open(dir.path())?;
+    for path in [
+        r"..\escape.md",
+        r"folder\..\escape.md",
+        "folder/../escape.md",
+        r"C:\escape.md",
+        r"C:escape.md",
+        r"\escape.md",
+        r"\\server\share\escape.md",
+        r"\\?\C:\escape.md",
+        r"\\.\NUL",
+        r"folder\a.md:stream",
+        r".obsidian\config.json",
+        r".OBSIDIAN\config.json",
+        r"folder\.obsidian\config.json",
+        r".\.obsidian\config.json",
+        r".obsidian.\config.json",
+        r".obsidian \config.json",
+    ] {
+        assert!(
+            v.resolve(Path::new(path)).is_err(),
+            "accepted unsafe path: {path}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_junctions_cannot_escape_or_access_obsidian() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let v = Vault::open(dir.path())?;
+    fs::create_dir(dir.path().join(".obsidian"))?;
+    for (name, target) in [
+        ("outside", outside.path().to_path_buf()),
+        ("protected", dir.path().join(".obsidian")),
+    ] {
+        // Directory junctions do not require the symbolic-link privilege.
+        let link = dir.path().join(name);
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "junction creation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result = v.create(&Path::new(name).join("escape.md"), false);
+        fs::remove_dir(link)?;
+        assert!(result.is_err(), "accepted junction: {name}");
+        assert!(!target.join("escape.md").exists());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_into_obsidian_is_rejected() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let v = Vault::open(dir.path())?;
+    fs::create_dir(dir.path().join(".obsidian"))?;
+    std::os::unix::fs::symlink(dir.path().join(".obsidian"), dir.path().join("alias"))?;
+    assert!(v.create(Path::new("alias/config.json"), false).is_err());
+    assert!(!dir.path().join(".obsidian/config.json").exists());
     Ok(())
 }

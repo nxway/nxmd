@@ -55,8 +55,16 @@ impl Vault {
         while !parent.exists() {
             parent = parent.parent().context("Invalid path")?;
         }
-        if !dunce::canonicalize(parent)?.starts_with(&self.root) {
-            bail!("Symlink escapes vault");
+        let canonical_parent = dunce::canonicalize(parent)?;
+        let inside = canonical_parent
+            .strip_prefix(&self.root)
+            .context("Symlink escapes vault")?;
+        if inside.components().any(|c| {
+            c.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(".obsidian")
+        }) {
+            bail!("Obsidian configuration is protected through filesystem aliases too");
         }
         Ok(path)
     }
