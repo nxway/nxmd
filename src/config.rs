@@ -1,12 +1,26 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
     pub vault: Option<PathBuf>,
     pub recent: Vec<PathBuf>,
     pub tabs: Vec<PathBuf>,
     pub active: usize,
+    pub sidebar_width: f32,
+    pub sidebar_visible: bool,
+}
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            vault: None,
+            recent: vec![],
+            tabs: vec![],
+            active: 0,
+            sidebar_width: 256.,
+            sidebar_visible: true,
+        }
+    }
 }
 impl Session {
     pub fn path() -> PathBuf {
@@ -33,5 +47,18 @@ impl Session {
         temp.as_file().sync_all()?;
         temp.persist(p).map_err(|e| e.error)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn old_sessions_keep_sidebar_defaults() {
+        let s: Session = serde_json::from_str(r#"{"tabs":["n.md"],"active":0}"#).unwrap();
+        assert!(s.sidebar_visible);
+        assert_eq!(s.sidebar_width, 256.);
+        let restored: Session = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
+        assert_eq!(restored.tabs, s.tabs);
     }
 }

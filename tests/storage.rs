@@ -157,3 +157,29 @@ fn symlink_into_obsidian_is_rejected() -> anyhow::Result<()> {
     assert!(!dir.path().join(".obsidian/config.json").exists());
     Ok(())
 }
+
+#[test]
+fn explorer_folders_first_and_natural_names() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let v = Vault::open(dir.path())?;
+    for folder in ["48. Millie", "5. St. Nora", "2. Folder"] {
+        v.create(Path::new(folder), true)?;
+    }
+    for file in ["10.md", "2.md", "a.md", "A.md"] {
+        // Case-insensitive filesystems cannot contain both a.md and A.md.
+        if !dir.path().join(file).exists() {
+            v.create(Path::new(file), false)?;
+        }
+    }
+    let entries = v.entries(Path::new(""))?;
+    assert_eq!(
+        entries[..3]
+            .iter()
+            .map(|e| e.path.to_string_lossy())
+            .collect::<Vec<_>>(),
+        vec!["2. Folder", "5. St. Nora", "48. Millie"]
+    );
+    assert_eq!(entries[3].path, Path::new("2.md"));
+    assert_eq!(entries[4].path, Path::new("10.md"));
+    Ok(())
+}

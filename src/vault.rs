@@ -89,7 +89,14 @@ impl Vault {
                 });
             }
         }
-        out.sort_by_key(|e| (!e.directory, e.path.clone()));
+        out.sort_by_cached_key(|e| {
+            (
+                !e.directory,
+                crate::natural::NaturalKey::new(
+                    &e.path.file_name().unwrap_or_default().to_string_lossy(),
+                ),
+            )
+        });
         Ok(out)
     }
     pub fn create(&self, path: &Path, directory: bool) -> Result<()> {

@@ -35,6 +35,8 @@ public static class NativeSmoke {
             if(id==pid && IsWindowVisible(h) && c.ToString()=="#32770") {found=h; return false;} return true; },IntPtr.Zero);
         return found;
     }
+    public static void RightClick(IntPtr h,int x,int y) { var p=new IntPtr((y<<16)|x); SendMessage(h,0x200,IntPtr.Zero,p); SendMessage(h,0x204,new IntPtr(2),p); SendMessage(h,0x205,IntPtr.Zero,p); }
+    public static void MiddleClick(IntPtr h,int x,int y) {var p=new IntPtr((y<<16)|x); SendMessage(h,0x207,new IntPtr(16),p); SendMessage(h,0x208,IntPtr.Zero,p);}
     public static void Click(IntPtr h,int x,int y) { var p=new IntPtr((y<<16)|x); SendMessage(h,0x200,IntPtr.Zero,p); SendMessage(h,0x201,new IntPtr(1),p); SendMessage(h,0x202,IntPtr.Zero,p); }
 }
 '@
@@ -109,27 +111,71 @@ try {
     $mainWindow=$process.MainWindowHandle
     # Exercise real native dialogs from GPUI event handlers, including cancel and accept.
     [void][NativeSmoke]::SetForegroundWindow($mainWindow)
-    [NativeSmoke]::Click($mainWindow,80,74)
+    [NativeSmoke]::Click($mainWindow,226,32)
     $dialog=Wait-Dialog
     [void][NativeSmoke]::SetForegroundWindow($dialog)
     Cancel-Dialog
     Open-Dialog '^o'; Select-Path $vault.FullName $true
     Open-Dialog '^n'; Cancel-Dialog
     [void][NativeSmoke]::SetForegroundWindow($mainWindow)
-    [NativeSmoke]::Click($mainWindow,80,114)
+    [NativeSmoke]::Click($mainWindow,196,84)
     $dialog=Wait-Dialog
     [void][NativeSmoke]::SetForegroundWindow($dialog)
     Start-Sleep -Milliseconds 300
     Select-Path (Join-Path $vault 'Created.md')
     if (!(Test-Path (Join-Path $vault 'Created.md'))) { throw 'New note dialog did not create the selected file' }
-    # Existing sidebar commands: New folder, Save as copy, Rename/Move, Trash.
-    foreach ($y in @(146,183,220,257)) {
-        [void][NativeSmoke]::SetForegroundWindow($mainWindow)
-        [NativeSmoke]::Click($mainWindow,80,$y)
-        $dialog=Wait-Dialog
-        [void][NativeSmoke]::SetForegroundWindow($dialog)
-        Cancel-Dialog
+    # Edit and select Markdown, then verify undo/redo retain source bytes.
+    [System.Windows.Forms.SendKeys]::SendWait('First **bold** note')
+    [System.Windows.Forms.SendKeys]::SendWait('^s')
+    Start-Sleep -Milliseconds 400
+    $created=Join-Path $vault 'Created.md'
+    $original=[IO.File]::ReadAllText($created)
+    if ($original -ne 'First **bold** note') { throw "Markdown typing failed: $original" }
+    [System.Windows.Forms.SendKeys]::SendWait('^aReplacement')
+    [System.Windows.Forms.SendKeys]::SendWait('^z^s')
+    Start-Sleep -Milliseconds 400
+    if ([IO.File]::ReadAllText($created) -ne $original) { throw 'Selection undo failed' }
+    [System.Windows.Forms.SendKeys]::SendWait('^+z^s')
+    Start-Sleep -Milliseconds 400
+    if ([IO.File]::ReadAllText($created) -ne 'Replacement') { throw 'Selection redo failed' }
+    # New folder toolbar button.
+    [NativeSmoke]::Click($mainWindow,226,84)
+    $dialog=Wait-Dialog; [void][NativeSmoke]::SetForegroundWindow($dialog); Cancel-Dialog
+    # Context menus target Smoke.md (second row), even while Created.md is active.
+    foreach ($action in @(0,1,2)) {
+        [NativeSmoke]::RightClick($mainWindow,80,149)
+        Start-Sleep -Milliseconds 200
+        [NativeSmoke]::Click($mainWindow,120,(202+32*$action))
+        $dialog=Wait-Dialog; [void][NativeSmoke]::SetForegroundWindow($dialog); Cancel-Dialog
+        $sessionState=Get-Content (Join-Path $config 'session.json') -Raw | ConvertFrom-Json
+        if ($sessionState.tabs[$sessionState.active] -ne 'Smoke.md') { throw 'Context action targeted the wrong file' }
     }
+    # Close inactive Created.md by its close icon: Smoke.md must stay active.
+    [NativeSmoke]::Click($mainWindow,464,22)
+    Start-Sleep -Milliseconds 300
+    $sessionState=Get-Content (Join-Path $config 'session.json') -Raw | ConvertFrom-Json
+    if ($sessionState.tabs.Count -ne 1 -or $sessionState.tabs[0] -ne 'Smoke.md') { throw 'Inactive tab close changed the wrong tab' }
+    # Open Created.md, edit, then introduce a conflicting external write.
+    [NativeSmoke]::Click($mainWindow,100,119)
+    [System.Windows.Forms.SendKeys]::SendWait('^{END}x')
+    [IO.File]::WriteAllText($created,'External version',[Text.UTF8Encoding]::new($false))
+    [System.Windows.Forms.SendKeys]::SendWait('^w')
+    Start-Sleep -Milliseconds 300
+    $sessionState=Get-Content (Join-Path $config 'session.json') -Raw | ConvertFrom-Json
+    if ($sessionState.tabs.Count -ne 2 -or [IO.File]::ReadAllText($created) -ne 'External version') { throw 'Failed-save close protection was bypassed' }
+    # Restore the known baseline, then explicitly save and close this test document.
+    [IO.File]::WriteAllText($created,'Replacement',[Text.UTF8Encoding]::new($false))
+    [System.Windows.Forms.SendKeys]::SendWait('^s')
+    [NativeSmoke]::MiddleClick($mainWindow,550,22)
+    Start-Sleep -Milliseconds 300
+    $sessionState=Get-Content (Join-Path $config 'session.json') -Raw | ConvertFrom-Json
+    if ($sessionState.tabs.Count -ne 1 -or $sessionState.tabs[0] -ne 'Smoke.md') { throw 'Middle-click tab close failed' }
+    # Save a screenshot of the actual native UI for visual review.
+    $bounds=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $bitmap=[System.Drawing.Bitmap]::new($bounds.Width,$bounds.Height)
+    $graphics=[System.Drawing.Graphics]::FromImage($bitmap)
+    $graphics.CopyFromScreen($bounds.Location,[System.Drawing.Point]::Empty,$bounds.Size)
+    $bitmap.Save((Join-Path $resultDir.FullName 'ui.png')); $graphics.Dispose(); $bitmap.Dispose()
     if ((Get-FileHash $note -Algorithm SHA256).Hash -ne $before) { throw 'Dialog operations changed the existing note' }
     # Confirm completion callbacks ran, not merely that Windows closed the dialogs.
     $diagnostics=Get-ChildItem (Join-Path $config 'logs') -Filter '*.log' | Get-Content | Out-String
@@ -145,7 +191,7 @@ try {
     if ($probe.ExitCode -eq 0) { throw 'Panic probe unexpectedly succeeded' }
     $panicLogs=Get-ChildItem (Join-Path $config 'logs') -Filter '*.log' | Get-Content | Out-String
     if (!$panicLogs.Contains('nxmd diagnostic self-test') -or !$panicLogs.Contains('PANIC:')) { throw 'Persistent panic log was not written' }
-    'PASS: native dialogs opened/cancelled; Open vault and New note accepted; all six dialog callbacks completed; note preserved; clean shutdown; persistent panic log verified.'  | Tee-Object (Join-Path $resultDir 'result.txt')
+    'PASS: targeted context menus, mouse/middle tab close, selection undo/redo and failed-save protection; native dialogs opened/cancelled; Open vault and New note accepted; all six dialog callbacks completed; note preserved; clean shutdown; persistent panic log verified.'  | Tee-Object (Join-Path $resultDir 'result.txt')
 } catch {
     if ($process -and !$process.HasExited) {
         $h=[NativeSmoke]::Dialog($process.Id)
