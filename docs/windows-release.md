@@ -25,3 +25,24 @@ cargo build --locked --release
 The smoke test uses a temporary vault and isolated LOCALAPPDATA. It checks native window creation, responsiveness, unchanged note bytes and graceful exit. It does not certify IME, clipboard, drop behavior, rendering correctness or editing interactions. No personal vault is used.
 
 `artifacts/` contains the executable, its SHA-256 digest, commit, compiler/runner details, native import report and Windows Rust dependency tree. Workflow logs contain compilation and test output. Source licenses are retained; the package includes nxmd and direct editor attribution. Full transitive redistribution notices should be audited before public distribution.
+
+## Dialog crash fix and diagnostics
+
+File/folder pickers and the trash confirmation now use GPUI's asynchronous native
+prompt APIs. On Windows, GPUI owns the dialog, serializes requests and runs the
+modal loop on its dedicated COM apartment thread. nxmd no longer invokes rfd
+synchronously while a GPUI event handler holds application state.
+
+Diagnostic files are written per process under `%LOCALAPPDATA%\nxmd\logs`.
+They include startup, dialog request/completion and error messages. Rust panics
+include a forced backtrace. A best-effort native unhandled-exception handler
+records the exception code to a pre-opened file without allocating, then leaves
+normal Windows crash handling in place. Forced termination, stack exhaustion or
+severe corruption cannot be guaranteed to produce a log. These files are local;
+they are not uploaded by the application. They are not automatically rotated.
+
+The Windows smoke test exercises all six dialog entry points, accepts a vault
+and a new note through the real native dialogs, checks cancellation and owner
+re-enabling, verifies unchanged existing note bytes, and checks persistent panic
+logging using a separate `nxmd.exe --test-panic-log` process. That diagnostic
+switch intentionally exits with a panic; it is not a normal launch command.
