@@ -403,6 +403,7 @@ impl Workspace {
             }
         } else {
             self.open(path.clone(), window, cx);
+            self.persist();
             if self
                 .tabs
                 .get(self.active)

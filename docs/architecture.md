@@ -13,7 +13,9 @@ Inspected current upstream sources before implementing the editor integration:
 `config`: session JSON in the user's configuration directory, outside the vault.
 `attachments`: collision-safe imports and vault-local path resolution.
 `ui`: GPUI shell, editor entities per tab, subscriptions and save scheduling.
-`theme`: editor palette. `main`: native application lifecycle.
+`theme`: editor palette. `design`: shared native color tokens, SVG icons and small controls.
+`natural`: deterministic Unicode lowercase/numeric filename ordering.
+`tabs`: pure selection adjustment when any tab closes. `main`: native application lifecycle.
 
 Markdown remains the editor's source text. We do not parse and serialize it through an AST on save. Each tab retains its own editor and undo history. The host does not reparse Markdown on edits; parsing/projection belongs to the reused engine. This engine uses a String, not a rope, and its auto-growing layout is not yet a verified large-document solution. Do not claim incremental or bounded-cost editing without profiling it.
 
@@ -24,3 +26,11 @@ No HTTP client is initialized and no remote image loader is installed by nxmd. F
 Writes use same-directory temporary files, flush data and compare original bytes twice before atomic replacement. This detects external edits but is not a filesystem transaction with noncooperating writers: there remains a race between the last comparison and replacement. Symlink containment likewise is not hardened against adversarial concurrent directory replacement. Do not describe either as race-free. Renames use hard-link/unlink and refuse existing destinations; unsupported filesystems produce errors. Deletions retain notes under `.nxmd-trash`.
 
 Closing the window attempts dirty saves and refuses closure on failure. Process termination/crashes can still lose edits within the debounce interval; durable draft recovery is not implemented. External changes are detected by polling open notes; there is no recursive watcher. Session errors appear in the status bar.
+
+## Workspace presentation
+
+The shell uses GPUI primitives from the pinned `gpui-pre` 0.3.12, with ten tiny embedded SVGs and no added dependencies. A uniform list only constructs visible explorer rows; expansion loads directory contents outside rendering. Sorting caches lowercase/numeric keys and uses original filenames to break ties deterministically. It is locale independent, not a linguistic collation or Unicode normalization service.
+
+Tabs retain their original editor entities and undo histories. All mouse/keyboard close paths save the selected target before removal, refusing a failed save. Context actions capture the clicked path and verify it loaded before invoking an operation. Secondary file actions reuse the existing asynchronous prompts. The reading container and editor theme change presentation without replacing source/projection machinery. Sidebar size and visibility use backward-compatible session fields.
+
+Idle saves still wake every 500 ms; external byte comparisons run every two seconds and before every save. The shell no longer requests a render on every idle tick. There is no filesystem scan in rendering. The open editor's own caret and text-layout costs remain.

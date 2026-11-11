@@ -131,11 +131,15 @@ try {
     $created=Join-Path $vault 'Created.md'
     $original=[IO.File]::ReadAllText($created)
     if ($original -ne 'First **bold** note') { throw "Markdown typing failed: $original" }
-    [System.Windows.Forms.SendKeys]::SendWait('^aReplacement')
-    [System.Windows.Forms.SendKeys]::SendWait('^z^s')
+    [System.Windows.Forms.Clipboard]::SetText('Replacement')
+    [System.Windows.Forms.SendKeys]::SendWait('^a')
+    [System.Windows.Forms.SendKeys]::SendWait('^v')
+    [System.Windows.Forms.SendKeys]::SendWait('^z')
+    [System.Windows.Forms.SendKeys]::SendWait('^s')
     Start-Sleep -Milliseconds 400
     if ([IO.File]::ReadAllText($created) -ne $original) { throw 'Selection undo failed' }
-    [System.Windows.Forms.SendKeys]::SendWait('^+z^s')
+    [System.Windows.Forms.SendKeys]::SendWait('^+z')
+    [System.Windows.Forms.SendKeys]::SendWait('^s')
     Start-Sleep -Milliseconds 400
     if ([IO.File]::ReadAllText($created) -ne 'Replacement') { throw 'Selection redo failed' }
     # New folder toolbar button.
@@ -143,6 +147,7 @@ try {
     $dialog=Wait-Dialog; [void][NativeSmoke]::SetForegroundWindow($dialog); Cancel-Dialog
     # Context menus target Smoke.md (second row), even while Created.md is active.
     foreach ($action in @(0,1,2)) {
+        [NativeSmoke]::Click($mainWindow,370,22)
         [NativeSmoke]::RightClick($mainWindow,80,149)
         Start-Sleep -Milliseconds 200
         [NativeSmoke]::Click($mainWindow,120,(202+32*$action))
@@ -157,7 +162,8 @@ try {
     if ($sessionState.tabs.Count -ne 1 -or $sessionState.tabs[0] -ne 'Smoke.md') { throw 'Inactive tab close changed the wrong tab' }
     # Open Created.md, edit, then introduce a conflicting external write.
     [NativeSmoke]::Click($mainWindow,100,119)
-    [System.Windows.Forms.SendKeys]::SendWait('^{END}x')
+    [System.Windows.Forms.SendKeys]::SendWait('^{END}')
+    [System.Windows.Forms.SendKeys]::SendWait('x')
     [IO.File]::WriteAllText($created,'External version',[Text.UTF8Encoding]::new($false))
     [System.Windows.Forms.SendKeys]::SendWait('^w')
     Start-Sleep -Milliseconds 300
@@ -170,6 +176,24 @@ try {
     Start-Sleep -Milliseconds 300
     $sessionState=Get-Content (Join-Path $config 'session.json') -Raw | ConvertFrom-Json
     if ($sessionState.tabs.Count -ne 1 -or $sessionState.tabs[0] -ne 'Smoke.md') { throw 'Middle-click tab close failed' }
+    # Load a long mixed-Markdown note, move the caret and round-trip an edit/undo.
+    $mixed = "# A quieter workspace`n`nA place to collect the things worth noticing. Just your words, with room to breathe.`n`n## Notes from the studio`n`nThe best ideas arrive between tasks. **Make a little space for them.**`n`n> Simplicity is the result of careful choices.`n`n- [x] Gather the research`n- [ ] Make time for the first draft`n- [ ] Read it aloud`n`n"
+    $mixed += ('## Working notes' + "`n`n" + 'A paragraph with **bold**, *italic*, ~~strike~~, `inline code` and [a local link](Smoke.md).' + "`n`n" + "1. First thought`n2. Another thought`n`n" + '```rust' + "`nfn main() {}`n" + '```' + "`n`n" + "| Detail | Direction |`n| --- | --- |`n| Focus | Keep it simple |`n`n") * 60
+    $longNote=Join-Path $vault 'Writing.md'
+    [IO.File]::WriteAllText($longNote,$mixed,[Text.UTF8Encoding]::new($false))
+    Open-Dialog '^o'; Select-Path $vault.FullName $true
+    [NativeSmoke]::Click($mainWindow,100,179)
+    Start-Sleep -Milliseconds 500
+    [System.Windows.Forms.SendKeys]::SendWait('^{END}')
+    [System.Windows.Forms.SendKeys]::SendWait('x')
+    [System.Windows.Forms.SendKeys]::SendWait('^s')
+    Start-Sleep -Milliseconds 400
+    if ([IO.File]::ReadAllText($longNote) -cne ($mixed+'x')) { throw 'Long Markdown caret edit changed unrelated source' }
+    [System.Windows.Forms.SendKeys]::SendWait('^z')
+    [System.Windows.Forms.SendKeys]::SendWait('^s')
+    [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
+    Start-Sleep -Milliseconds 400
+    if ([IO.File]::ReadAllText($longNote) -cne $mixed) { throw 'Long Markdown undo did not preserve source' }
     # Save a screenshot of the actual native UI for visual review.
     $bounds=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
     $bitmap=[System.Drawing.Bitmap]::new($bounds.Width,$bounds.Height)

@@ -22,7 +22,7 @@ cargo build --locked --release
 ./scripts/windows-smoke.ps1 -Executable ./target/release/nxmd.exe
 ```
 
-The smoke test uses a temporary vault and isolated LOCALAPPDATA. It checks native window creation, responsiveness, unchanged note bytes and graceful exit. It does not certify IME, clipboard, drop behavior, rendering correctness or editing interactions. No personal vault is used.
+The smoke test uses a temporary vault and isolated LOCALAPPDATA. It checks native window creation, responsiveness, typing and selection undo/redo, targeted context actions, mouse/middle tab closing, external-conflict close protection, unchanged note bytes and graceful exit. It does not certify IME, clipboard, drop behavior or exhaustive editing correctness. No personal vault is used.
 
 `artifacts/` contains the executable, its SHA-256 digest, commit, compiler/runner details, native import report and Windows Rust dependency tree. Workflow logs contain compilation and test output. Source licenses are retained; the package includes nxmd and direct editor attribution. Full transitive redistribution notices should be audited before public distribution.
 

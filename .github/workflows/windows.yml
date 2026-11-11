@@ -45,7 +45,10 @@ jobs:
         shell: pwsh
         timeout-minutes: 3
         run: ./scripts/windows-smoke.ps1 -Executable ./target/release/nxmd.exe
+      # Historical artifacts expire; their absence must not block a release.
       - name: Download comparison baseline
+        id: baseline
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
@@ -54,6 +57,7 @@ jobs:
           merge-multiple: true
           path: baseline-release
       - name: Compare native process metrics
+        if: steps.baseline.outcome == 'success'
         shell: pwsh
         run: ./scripts/windows-performance.ps1 -Baseline ./baseline-release/nxmd.exe -Candidate ./target/release/nxmd.exe
       - name: Upload smoke-test results
