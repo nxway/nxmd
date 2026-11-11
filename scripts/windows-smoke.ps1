@@ -108,10 +108,19 @@ try {
     if ((Get-FileHash $note -Algorithm SHA256).Hash -ne $before) { throw 'Opening a note changed its bytes' }
     $mainWindow=$process.MainWindowHandle
     # Exercise real native dialogs from GPUI event handlers, including cancel and accept.
-    Open-Dialog '^o'; Cancel-Dialog
+    [void][NativeSmoke]::SetForegroundWindow($mainWindow)
+    [NativeSmoke]::Click($mainWindow,80,74)
+    $dialog=Wait-Dialog
+    [void][NativeSmoke]::SetForegroundWindow($dialog)
+    Cancel-Dialog
     Open-Dialog '^o'; Select-Path $vault.FullName $true
     Open-Dialog '^n'; Cancel-Dialog
-    Open-Dialog '^n'; Select-Path (Join-Path $vault 'Created.md')
+    [void][NativeSmoke]::SetForegroundWindow($mainWindow)
+    [NativeSmoke]::Click($mainWindow,80,114)
+    $dialog=Wait-Dialog
+    [void][NativeSmoke]::SetForegroundWindow($dialog)
+    Start-Sleep -Milliseconds 300
+    Select-Path (Join-Path $vault 'Created.md')
     if (!(Test-Path (Join-Path $vault 'Created.md'))) { throw 'New note dialog did not create the selected file' }
     # Existing sidebar commands: New folder, Save as copy, Rename/Move, Trash.
     foreach ($y in @(146,183,220,257)) {

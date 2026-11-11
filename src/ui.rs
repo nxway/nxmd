@@ -25,6 +25,7 @@ enum NewPath {
     Move,
 }
 pub struct Workspace {
+    focus: FocusHandle,
     dialog_busy: bool,
     sidebar: bool,
     vault: Option<Vault>,
@@ -71,6 +72,7 @@ impl Workspace {
         let paths = session.tabs.clone();
         let active = session.active;
         let mut app = Self {
+            focus: cx.focus_handle(),
             dialog_busy: false,
             sidebar: true,
             vault,
@@ -286,7 +288,7 @@ impl Workspace {
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = result.await.map_err(anyhow::Error::from).and_then(|r| r);
-            let _ = this.update_in(cx, |this, _, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.dialog_busy = false;
                 log::info!("dialog open-vault completed");
                 match result {
@@ -301,6 +303,7 @@ impl Workspace {
                                 Ok(v) => {
                                     this.vault = Some(v);
                                     this.tabs.clear();
+                                    window.focus(&this.focus, cx);
                                     this.active = 0;
                                     this.expanded.clear();
                                     this.session.recent.retain(|r| r != p);
@@ -566,6 +569,7 @@ impl Render for Workspace {
             .collect();
         let editor = self.tabs.get(self.active).map(|t| t.editor.clone());
         div()
+            .track_focus(&self.focus)
             .size_full()
             .flex()
             .flex_col()
