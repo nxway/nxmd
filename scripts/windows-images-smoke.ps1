@@ -117,7 +117,7 @@ $process=Start-Process -FilePath $exe -PassThru -RedirectStandardOutput (Join-Pa
 Wait-ImageCondition { $process.Refresh(); $process.MainWindowHandle -ne 0 } 'Image session did not reopen'
 $mainWindow=$process.MainWindowHandle
 [void][NativeSmoke]::SetForegroundWindow($mainWindow)
-Wait-ImageCondition { (Color-Pixels 0 255 0) -gt 250 } 'Restored image tab did not render'
+Wait-ImageCondition { (Active-ImagePath) -eq 'attachments/image-1.png' -and (Color-Pixels 0 255 0) -gt 250 } 'Restored image tab did not render or persist its active selection'
 if ((Get-FileHash $imported).Hash -ne $importHash) { throw 'Image changed across restart' }
 # Many files: no thumbnail decoding on enumeration, and bounded lazy viewing.
 $process.Refresh();$beforeImages=@{workingSetBytes=$process.WorkingSet64;privateBytes=$process.PrivateMemorySize64}

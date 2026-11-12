@@ -27,6 +27,7 @@ const MAX_ENTRIES: usize = 128;
 pub struct ImageStore {
     entries: HashMap<Key, (State, u64)>,
     paths: HashMap<Key, PathBuf>,
+    retired: Vec<Arc<RenderImage>>,
     clock: u64,
     pub generation: u64,
     active: PathBuf,
@@ -66,7 +67,9 @@ impl ImageStore {
             .min_by_key(|(_, (_, used))| *used)
             .map(|(k, _)| k.clone());
         if let Some(k) = key {
-            self.entries.remove(&k);
+            if let Some((State::Ready { image, .. }, _)) = self.entries.remove(&k) {
+                self.retired.push(image);
+            }
             self.paths.remove(&k);
             true
         } else {
@@ -97,6 +100,23 @@ impl ImageStore {
             self.last_error = Some(e.clone());
         }
         self.entries.insert(key, (state, self.clock));
+    }
+    /// GPUI's sprite atlas has its own lifetime; releasing CPU Arcs alone does
+    /// not remove GPU tiles. Drain on the app thread, outside painting.
+    pub fn take_retired(&mut self) -> Vec<Arc<RenderImage>> {
+        let live: HashSet<_> = self
+            .entries
+            .values()
+            .filter_map(|(s, _)| match s {
+                State::Ready { image, .. } => Some(image.id),
+                _ => None,
+            })
+            .collect();
+        let mut seen = HashSet::new();
+        std::mem::take(&mut self.retired)
+            .into_iter()
+            .filter(|image| !live.contains(&image.id) && seen.insert(image.id))
+            .collect()
     }
     pub fn known_paths(&self) -> HashSet<PathBuf> {
         self.paths
@@ -142,12 +162,26 @@ impl ImageStore {
             .sum()
     }
     pub fn invalidate(&mut self) {
+        self.retired
+            .extend(self.entries.values().filter_map(|(s, _)| match s {
+                State::Ready { image, .. } => Some(image.clone()),
+                _ => None,
+            }));
         self.entries.clear();
         self.paths.clear();
         self.last_error = None;
         self.generation += 1;
     }
     pub fn close(&mut self, note: &std::path::Path) {
+        self.retired.extend(
+            self.entries
+                .iter()
+                .filter(|(k, _)| k.note == note)
+                .filter_map(|(_, (s, _))| match s {
+                    State::Ready { image, .. } => Some(image.clone()),
+                    _ => None,
+                }),
+        );
         self.entries.retain(|k, _| k.note != note);
         self.paths.retain(|k, _| k.note != note);
     }
@@ -204,6 +238,13 @@ mod tests {
         assert_eq!(cache.bytes(), 16 * 1024 * 1024);
         assert!(matches!(cache.request(b), State::Ready { .. }));
         assert_eq!(cache.known_paths().len(), 1);
+        cache.close(std::path::Path::new("note.md"));
+        assert!(
+            cache.take_retired().is_empty(),
+            "active alias still uses GPU tiles"
+        );
+        cache.close(std::path::Path::new("viewer.png"));
+        assert_eq!(cache.take_retired().len(), 1);
     }
     #[test]
     fn closed_inflight_request_does_not_retain_pixels() {

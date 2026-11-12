@@ -21,6 +21,17 @@ pub fn import(vault: &Vault, note: &Path, bytes: &[u8]) -> Result<String> {
     };
     let dir = vault.resolve(Path::new("attachments"))?;
     std::fs::create_dir_all(&dir)?;
+    let meta = std::fs::symlink_metadata(&dir)?;
+    if meta.file_type().is_symlink() {
+        bail!("Attachments directory must not be a symbolic link");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if meta.file_attributes() & 0x400 != 0 {
+            bail!("Attachments directory must not be a junction or reparse point");
+        }
+    }
     let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
     temp.write_all(bytes)?;
     temp.as_file().sync_all()?;

@@ -43,13 +43,17 @@ unsafe Windows aliases and escaping symlink/junction targets are rejected.
 Decoding runs one request at a time on the GPUI background executor. Encoded data is
 limited to 32 MiB, dimensions to 8192 per edge and 16 megapixels, and decoder
 allocation requests to 64 MiB. Display rasters are reduced to at most 2048 per edge;
-original attachment bytes remain untouched. GIF and animated WebP use a first frame.
+original attachment bytes remain untouched. Windows bitmap clipboard data (CF_DIB,
+exposed by GPUI as BMP) is converted to full-resolution PNG on the background
+executor with the same decode limits. GIF and animated WebP use a first frame.
 
 The shared decoded cache admits at most 32 MiB of distinct raster pixels and 128
 reference entries, shares canonical-path aliases between notes and image tabs, and
 evicts inactive owners first. A single note exceeding that pixel budget displays a
 clear limit message rather than cycling through endless eviction/redecode. Close,
 F5 and relevant image/directory changes release or invalidate cached resources.
+Evicted images are also removed from GPUI's sprite atlas on the app thread; live
+canonical aliases keep their shared GPU tiles.
 Encoded input, a currently decoding source, resized output and GPUI/GPU allocations
 are additional transient/framework costs; 32 MiB is not a total-process RAM promise.
 

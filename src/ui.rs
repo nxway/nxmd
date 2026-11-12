@@ -146,6 +146,9 @@ impl Workspace {
             window.focus(&app.focus, cx);
         }
         app.focus_active(window, cx);
+        if app.vault.is_some() {
+            app.persist();
+        }
         app
     }
     fn persist(&mut self) {
@@ -321,6 +324,9 @@ impl Workspace {
         }
     }
     fn tick(&mut self, cx: &mut Context<Self>) {
+        for image in self.images.borrow_mut().take_retired() {
+            cx.drop_image(image, None);
+        }
         self.poll_images(cx);
         let check_external = Instant::now() >= self.next_external_check;
         if check_external {
@@ -403,7 +409,7 @@ impl Workspace {
                     .map(|(bytes, source)| {
                         let bytes = match source {
                             Some(p) => nxmd::images::read(&p)?,
-                            None => bytes,
+                            None => nxmd::images::clipboard_bytes(&bytes)?,
                         };
                         nxmd::attachments::import(&vault, &note, &bytes)
                     })

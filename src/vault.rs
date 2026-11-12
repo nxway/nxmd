@@ -45,26 +45,23 @@ impl Vault {
         for component in relative.components() {
             if let Component::Normal(name) = component {
                 let name = name.to_string_lossy();
-                let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
-                let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-                    || ["COM", "LPT"].iter().any(|prefix| {
-                        stem.strip_prefix(prefix).is_some_and(|n| {
-                            matches!(
-                                n,
-                                "1" | "2"
-                                    | "3"
-                                    | "4"
-                                    | "5"
-                                    | "6"
-                                    | "7"
-                                    | "8"
-                                    | "9"
-                                    | "¹"
-                                    | "²"
-                                    | "³"
-                            )
-                        })
-                    });
+                let stem = name
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end()
+                    .to_ascii_uppercase();
+                let reserved = matches!(
+                    stem.as_str(),
+                    "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$"
+                ) || ["COM", "LPT"].iter().any(|prefix| {
+                    stem.strip_prefix(prefix).is_some_and(|n| {
+                        matches!(
+                            n,
+                            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                        )
+                    })
+                });
                 if reserved
                     || name.chars().any(char::is_control)
                     || name.contains([':', '\\', '<', '>', '"', '|', '?', '*'])

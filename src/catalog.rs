@@ -75,6 +75,7 @@ impl Catalog {
                 match rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(Message::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     Ok(Message::Refresh) => {
+                        pending.insert(PathBuf::new());
                         pending.extend(state.directories.keys().cloned());
                         last_event = Instant::now();
                     }
@@ -111,6 +112,7 @@ impl Catalog {
                 if overflow.swap(false, Ordering::Relaxed)
                     || (state.error.is_some() && fallback.elapsed() > Duration::from_secs(5))
                 {
+                    pending.insert(PathBuf::new());
                     pending.extend(state.directories.keys().cloned());
                     image_change = true;
                     fallback = Instant::now();

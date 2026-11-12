@@ -88,6 +88,8 @@ fn explorer_images_unicode_natural_order_and_metadata() -> anyhow::Result<()> {
     );
     for bad in [
         "CON.png",
+        "NUL .png",
+        "CONIN$.png",
         "NUL",
         "COM1.jpg",
         "LPT¹.md",
@@ -296,6 +298,9 @@ fn linked_images_and_directories_cannot_escape() -> anyhow::Result<()> {
     std::os::unix::fs::symlink(outside.path().join("a.png"), d.path().join("alias.png"))?;
     assert!(attachments::resolve(&v, Path::new("n.md"), "link/a.png").is_err());
     assert!(attachments::resolve(&v, Path::new("n.md"), "alias.png").is_err());
+    std::os::unix::fs::symlink(outside.path(), d.path().join("attachments"))?;
+    assert!(attachments::import(&v, Path::new("n.md"), &png()).is_err());
+    assert!(!outside.path().join("image-1.png").exists());
     assert!(v.entries(Path::new("")).is_ok_and(|e| e.is_empty()));
     let c = Catalog::new(v);
     assert!(wait(&c, |_| true).images.is_empty());
@@ -329,7 +334,7 @@ fn junction_images_are_neither_indexed_nor_resolved_outside() -> anyhow::Result<
     let outside = tempfile::tempdir()?;
     let v = Vault::open(d.path())?;
     fs::write(outside.path().join("secret.png"), png())?;
-    let link = d.path().join("linked");
+    let link = d.path().join("attachments");
     let result = std::process::Command::new("cmd")
         .args(["/C", "mklink", "/J"])
         .arg(&link)
@@ -337,10 +342,41 @@ fn junction_images_are_neither_indexed_nor_resolved_outside() -> anyhow::Result<
         .output()?;
     assert!(result.status.success());
     assert!(v.entries(Path::new(""))?.is_empty());
-    assert!(attachments::resolve(&v, Path::new("n.md"), "linked/secret.png").is_err());
+    assert!(attachments::resolve(&v, Path::new("n.md"), "attachments/secret.png").is_err());
+    assert!(attachments::import(&v, Path::new("n.md"), &png()).is_err());
+    assert!(!outside.path().join("image-1.png").exists());
     let c = Catalog::new(v);
     assert!(wait(&c, |_| true).images.is_empty());
     drop(c);
     fs::remove_dir(link)?;
     Ok(())
+}
+
+#[test]
+fn native_bitmap_clipboard_converts_to_png_without_resizing() {
+    use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+    use std::io::Cursor;
+    let original = RgbaImage::from_pixel(2100, 2, Rgba([0, 255, 0, 255]));
+    let mut bmp = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(original.clone())
+        .write_to(&mut bmp, ImageFormat::Bmp)
+        .unwrap();
+    let png = nxmd::images::clipboard_bytes(bmp.get_ref()).unwrap();
+    assert_eq!(image::guess_format(&png).unwrap(), ImageFormat::Png);
+    assert_eq!(
+        image::load_from_memory(&png).unwrap().into_rgba8(),
+        original
+    );
+    assert!(nxmd::images::decode(bmp.get_ref()).is_err()); // BMP is clipboard-only.
+    let d = tempfile::tempdir().unwrap();
+    let v = nxmd::vault::Vault::open(d.path()).unwrap();
+    assert_eq!(
+        nxmd::attachments::import(&v, std::path::Path::new("Note.md"), &png).unwrap(),
+        "![](attachments/image-1.png)"
+    );
+    assert_eq!(
+        std::fs::read(d.path().join("attachments/image-1.png")).unwrap(),
+        png
+    );
+    assert!(nxmd::images::clipboard_bytes(b"BMbroken").is_err());
 }
