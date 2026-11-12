@@ -18,11 +18,12 @@ Install Rust stable x64 MSVC, Visual Studio C++ Build Tools and Windows SDK:
 ```powershell
 cargo test --locked --no-default-features
 cargo build --locked --release
+cargo test --locked --release --bin nxmd
 ./scripts/windows-package.ps1
 ./scripts/windows-smoke.ps1 -Executable ./target/release/nxmd.exe
 ```
 
-The smoke test uses a temporary vault and isolated LOCALAPPDATA. It checks native window creation, responsiveness, typing and selection undo/redo, targeted context actions, mouse/middle tab closing, external-conflict close protection, unchanged note bytes and graceful exit. It does not certify IME, clipboard, drop behavior or exhaustive editing correctness. No personal vault is used.
+The smoke test uses a temporary vault and isolated LOCALAPPDATA. It checks native window creation, responsiveness, typing and selection undo/redo, targeted context actions, mouse/middle tab closing, external-conflict close protection, unchanged note bytes and graceful exit. It also exercises native bitmap clipboard import, automatic image discovery, image tabs and restart, corrupt-image errors, standard/Obsidian image painting, source preservation and a large image directory. It does not certify IME, Windows shell drag-and-drop or exhaustive editing correctness. No personal vault is used.
 
 `artifacts/` contains the executable, its SHA-256 digest, commit, compiler/runner details, native import report and Windows Rust dependency tree. Workflow logs contain compilation and test output. Source licenses are retained; the package includes nxmd and direct editor attribution. Full transitive redistribution notices should be audited before public distribution.
 

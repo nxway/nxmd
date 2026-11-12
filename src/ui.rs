@@ -443,6 +443,9 @@ impl Workspace {
                         editor.update(cx, |e, cx| {
                             let at = if e.text() == original { at } else { e.cursor() };
                             e.replace_range(at..at, &format!("\n{reference}\n"), cx);
+                            // Zorite's host edit API records undo and redraws, but
+                            // does not emit the event used by our autosave subscription.
+                            cx.emit(EditorEvent::Changed);
                         });
                         log::info!("image import completed: {reference}");
                     } else {

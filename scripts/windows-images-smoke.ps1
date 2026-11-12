@@ -109,6 +109,16 @@ Remove-Item (Join-Path $imagesVault '0 Renamed.webp')
 Start-Sleep -Milliseconds 700
 [NativeSmoke]::Click($mainWindow,100,239)
 Wait-ImageCondition { (Active-ImagePath) -eq 'ImageNote.md' } 'Deleted image row remained in explorer'
+# A corrupt image opens an error tab without modifying the file or crashing.
+$broken=Join-Path $imagesVault '0 Broken.png'
+[IO.File]::WriteAllText($broken,'invalid image fixture')
+$brokenHash=(Get-FileHash $broken).Hash
+Start-Sleep -Milliseconds 700
+[NativeSmoke]::Click($mainWindow,100,239)
+Wait-ImageCondition { (Active-ImagePath) -eq '0 Broken.png' -and (Image-Logs).Contains('Unrecognized image data') } 'Corrupt image viewer did not report a useful error'
+[System.Windows.Forms.SendKeys]::SendWait('^s')
+if ((Get-FileHash $broken).Hash -ne $brokenHash) { throw 'Corrupt image viewer changed the file' }
+Remove-Item $broken
 # Restore a real image tab through a process restart, without a vault argument.
 [NativeSmoke]::Click($mainWindow,550,22)
 Wait-ImageCondition { (Active-ImagePath) -eq 'attachments/image-1.png' } 'Cannot activate imported image before restart'
@@ -141,4 +151,13 @@ $expansion=[regex]::Matches((Image-Logs),'explorer toggle: Big rows=(\d+) elapse
 if (!$expansion -or [int]$expansion.Groups[1].Value -lt 1500) { throw 'Large directory did not expand through the cached explorer' }
 @{importToViewerDisplayMs=[Math]::Round($importToViewerMs,1);cachedTreeExpansionMs=([double]$expansion.Groups[2].Value/1000);imageCount=1500;openedImageCount=12;openTwelveImagesThroughUiMs=[Math]::Round($multipleImageMs,1);beforeImages=$beforeImages;afterImages=$afterImages} | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $resultDir 'image-performance.json')
 $shot=Capture-Images 'image-viewer.png';$shot.Dispose()
-'PASS: native bitmap paste and autosave; automatic attachment visibility; image viewer and session restore; standard and Obsidian rendering; missing/ambiguous errors; byte-preserving source edit/undo; external image create/rename/delete; 1500-file expansion; 12 lazy image tabs.' | Tee-Object (Join-Path $resultDir 'image-result.txt')
+$lastImage=Join-Path $big 'img-0012.png'
+$lastHash=(Get-FileHash $lastImage).Hash
+[System.Windows.Forms.SendKeys]::SendWait('^w')
+Wait-ImageCondition {
+    $session=Get-Content (Join-Path $config 'session.json') -Raw | ConvertFrom-Json
+    (Active-ImagePath) -eq 'Big/img-0011.png' -and !($session.tabs | Where-Object { $_.Replace('\','/') -eq 'Big/img-0012.png' })
+} 'Closing an image tab did not persist removal and focus its neighbor'
+if ((Get-FileHash $lastImage).Hash -ne $lastHash) { throw 'Closing an image tab modified its file' }
+
+'PASS: native bitmap paste and autosave; automatic attachment visibility; image viewer, corrupt-image error, tab close and session restore; standard and Obsidian rendering; missing/ambiguous errors; byte-preserving source edit/undo; external image create/rename/delete; 1500-file expansion; 12 lazy image tabs.' | Tee-Object (Join-Path $resultDir 'image-result.txt')
