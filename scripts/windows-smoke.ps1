@@ -28,6 +28,7 @@ public static class NativeSmoke {
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     public static IntPtr Dialog(int pid) {
         IntPtr found=IntPtr.Zero;
@@ -43,6 +44,43 @@ public static class NativeSmoke {
 function Assert-Alive {
     $process.Refresh()
     if ($process.HasExited) { throw "App crashed during dialog test: $($process.ExitCode)" }
+}
+# SendWait uses SendInput on modern Windows: it can return before another
+# process handles the queued input. Observe completion instead of assuming that
+# 400 ms is enough on a hosted runner. Never resend typing or save commands.
+function Wait-SavedText([string]$Path,[string]$Expected,[string]$Message) {
+    $timer=[Diagnostics.Stopwatch]::StartNew()
+    $actual=$null
+    do {
+        Assert-Alive
+        try { $actual=[IO.File]::ReadAllText($Path) } catch [IO.IOException] { $actual=$null }
+        if ($actual -ceq $Expected) {
+            "$Message verified after $($timer.ElapsedMilliseconds) ms" | Add-Content (Join-Path $resultDir 'input-sync.txt')
+            return
+        }
+        Start-Sleep -Milliseconds 50
+    } while ($timer.Elapsed.TotalSeconds -lt 10)
+    throw "$Message; expected '$Expected', got '$actual'; foreground=$([NativeSmoke]::GetForegroundWindow()), owner=$mainWindow"
+}
+function Assert-EditorText([string]$Expected) {
+    # An actual Ctrl+A/C round trip proves the editor consumed typing and owns
+    # keyboard focus. Copy does not change the document or its undo history.
+    # Do not replace clipboard data here: an earlier paste may still be queued.
+    if ([System.Windows.Forms.Clipboard]::GetText() -ceq $Expected) { throw 'Copy checkpoint requires distinct initial clipboard contents' }
+    [System.Windows.Forms.SendKeys]::SendWait('^a')
+    [System.Windows.Forms.SendKeys]::SendWait('^c')
+    $timer=[Diagnostics.Stopwatch]::StartNew()
+    do {
+        Assert-Alive
+        $actual=[System.Windows.Forms.Clipboard]::GetText()
+        if ($actual -ceq $Expected) {
+            "Editor input/copy verified after $($timer.ElapsedMilliseconds) ms; foreground=$([NativeSmoke]::GetForegroundWindow()), owner=$mainWindow" | Add-Content (Join-Path $resultDir 'input-sync.txt')
+            [System.Windows.Forms.SendKeys]::SendWait('^{END}')
+            return
+        }
+        Start-Sleep -Milliseconds 50
+    } while ($timer.Elapsed.TotalSeconds -lt 10)
+    throw "Editor typing/copy failed; expected '$Expected', got '$actual'; foreground=$([NativeSmoke]::GetForegroundWindow()), owner=$mainWindow"
 }
 function Wait-Dialog {
     $until=[DateTime]::UtcNow.AddSeconds(20)
@@ -125,23 +163,24 @@ try {
     Select-Path (Join-Path $vault 'Created.md')
     if (!(Test-Path (Join-Path $vault 'Created.md'))) { throw 'New note dialog did not create the selected file' }
     # Edit and select Markdown, then verify undo/redo retain source bytes.
-    [System.Windows.Forms.SendKeys]::SendWait('First **bold** note')
-    [System.Windows.Forms.SendKeys]::SendWait('^s')
-    Start-Sleep -Milliseconds 400
     $created=Join-Path $vault 'Created.md'
-    $original=[IO.File]::ReadAllText($created)
-    if ($original -ne 'First **bold** note') { throw "Markdown typing failed: $original" }
+    $original='First **bold** note'
+    [System.Windows.Forms.Clipboard]::SetText([Guid]::NewGuid().ToString())
+    [System.Windows.Forms.SendKeys]::SendWait($original)
+    Assert-EditorText $original
+    [System.Windows.Forms.SendKeys]::SendWait('^s')
+    Wait-SavedText $created $original 'Markdown typing/save failed'
     [System.Windows.Forms.Clipboard]::SetText('Replacement')
     [System.Windows.Forms.SendKeys]::SendWait('^a')
     [System.Windows.Forms.SendKeys]::SendWait('^v')
     [System.Windows.Forms.SendKeys]::SendWait('^z')
+    Assert-EditorText $original
     [System.Windows.Forms.SendKeys]::SendWait('^s')
-    Start-Sleep -Milliseconds 400
-    if ([IO.File]::ReadAllText($created) -ne $original) { throw 'Selection undo failed' }
+    Wait-SavedText $created $original 'Selection undo failed'
     [System.Windows.Forms.SendKeys]::SendWait('^+z')
+    Assert-EditorText 'Replacement'
     [System.Windows.Forms.SendKeys]::SendWait('^s')
-    Start-Sleep -Milliseconds 400
-    if ([IO.File]::ReadAllText($created) -ne 'Replacement') { throw 'Selection redo failed' }
+    Wait-SavedText $created 'Replacement' 'Selection redo failed'
     # New folder toolbar button.
     [NativeSmoke]::Click($mainWindow,226,84)
     $dialog=Wait-Dialog; [void][NativeSmoke]::SetForegroundWindow($dialog); Cancel-Dialog
@@ -202,13 +241,11 @@ try {
     [System.Windows.Forms.SendKeys]::SendWait('^{END}')
     [System.Windows.Forms.SendKeys]::SendWait('x')
     [System.Windows.Forms.SendKeys]::SendWait('^s')
-    Start-Sleep -Milliseconds 400
-    if ([IO.File]::ReadAllText($longNote) -cne ($mixed+'x')) { throw 'Long Markdown caret edit changed unrelated source' }
+    Wait-SavedText $longNote ($mixed+'x') 'Long Markdown caret edit changed unrelated source'
     [System.Windows.Forms.SendKeys]::SendWait('^z')
     [System.Windows.Forms.SendKeys]::SendWait('^s')
     [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
-    Start-Sleep -Milliseconds 400
-    if ([IO.File]::ReadAllText($longNote) -cne $mixed) { throw 'Long Markdown undo did not preserve source' }
+    Wait-SavedText $longNote $mixed 'Long Markdown undo did not preserve source'
     . "$PSScriptRoot/windows-images-smoke.ps1"
     # Save a screenshot of the actual native UI for visual review.
     $bounds=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
