@@ -151,9 +151,24 @@ try {
         [NativeSmoke]::RightClick($mainWindow,80,149)
         Start-Sleep -Milliseconds 200
         [NativeSmoke]::Click($mainWindow,120,(202+32*$action))
-        $dialog=Wait-Dialog; [void][NativeSmoke]::SetForegroundWindow($dialog); Cancel-Dialog
+        $dialog=Wait-Dialog; [void][NativeSmoke]::SetForegroundWindow($dialog)
+        if ($action -eq 1) {
+            # Verify the operation's actual payload, independently of session state.
+            Start-Sleep -Milliseconds 300
+            $copy=Join-Path $vault 'Z-copy.md'
+            Select-Path $copy
+            if ([IO.File]::ReadAllText($copy) -cne $text) { throw 'Save as copy used the wrong document contents' }
+            if ([IO.File]::ReadAllText($created) -cne 'Replacement') { throw 'Context copy modified the unrelated active note' }
+            [System.Windows.Forms.SendKeys]::SendWait('^w')
+            Start-Sleep -Milliseconds 300
+        } else {
+            Cancel-Dialog
+        }
         $sessionState=Get-Content (Join-Path $config 'session.json') -Raw | ConvertFrom-Json
-        if ($sessionState.tabs[$sessionState.active] -ne 'Smoke.md') { throw 'Context action targeted the wrong file' }
+        if ($sessionState.tabs[$sessionState.active] -ne 'Smoke.md') {
+            $sessionState | ConvertTo-Json | Set-Content (Join-Path $resultDir 'context-session.json')
+            throw "Context action $action did not persist Smoke.md as active; session contains '$($sessionState.tabs[$sessionState.active])'"
+        }
     }
     # Close inactive Created.md by its close icon: Smoke.md must stay active.
     [NativeSmoke]::Click($mainWindow,464,22)
@@ -215,7 +230,7 @@ try {
     if ($probe.ExitCode -eq 0) { throw 'Panic probe unexpectedly succeeded' }
     $panicLogs=Get-ChildItem (Join-Path $config 'logs') -Filter '*.log' | Get-Content | Out-String
     if (!$panicLogs.Contains('nxmd diagnostic self-test') -or !$panicLogs.Contains('PANIC:')) { throw 'Persistent panic log was not written' }
-    'PASS: targeted context menus, mouse/middle tab close, selection undo/redo and failed-save protection; native dialogs opened/cancelled; Open vault and New note accepted; all six dialog callbacks completed; note preserved; clean shutdown; persistent panic log verified.'  | Tee-Object (Join-Path $resultDir 'result.txt')
+    'PASS: targeted context menus and accepted copy payload, mouse/middle tab close, selection undo/redo, long Markdown edit/undo and failed-save protection; native dialogs opened/cancelled; Open vault, New note and Save as copy accepted; all six dialog callbacks completed; note preserved; clean shutdown; persistent panic log verified.'  | Tee-Object (Join-Path $resultDir 'result.txt')
 } catch {
     if ($process -and !$process.HasExited) {
         $h=[NativeSmoke]::Dialog($process.Id)

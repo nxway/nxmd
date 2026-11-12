@@ -46,3 +46,15 @@ and a new note through the real native dialogs, checks cancellation and owner
 re-enabling, verifies unchanged existing note bytes, and checks persistent panic
 logging using a separate `nxmd.exe --test-panic-log` process. That diagnostic
 switch intentionally exits with a panic; it is not a normal launch command.
+
+## Retesting an existing executable
+
+Dispatch **Windows dialog regression** on the same commit as the executable's
+successful **Windows release** run, supplying that release's numeric run ID as
+`source_run_id`. The workflow compares the artifact's `commit.txt` with the
+checked-out test commit before launching the executable. A mismatched artifact
+fails with both commit IDs and a correction instruction; `provenance.json` is
+retained in the results. Selecting a newer workflow ref does not rebuild an old
+artifact. The context test also accepts Save as copy and compares the copied
+bytes with the right-clicked note while checking that the unrelated active note
+remains unchanged.

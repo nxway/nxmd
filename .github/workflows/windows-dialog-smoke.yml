@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       source_run_id:
-        description: Successful release-build run whose executable will be tested
+        description: Successful Windows release run built from this workflow ref's exact commit
         required: true
         type: string
 permissions:
@@ -22,12 +22,25 @@ jobs:
           pattern: nxmd-windows-x64-*
           merge-multiple: true
           path: release-under-test
-      - name: Record executable provenance
+      - name: Verify executable matches checked-out commit
         shell: pwsh
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force smoke-results | Out-Null
           Copy-Item release-under-test/commit.txt smoke-results/executable-commit.txt
           Get-FileHash release-under-test/nxmd.exe -Algorithm SHA256 | Out-String | Set-Content smoke-results/executable-sha256.txt
+          $expected = (git rev-parse HEAD).Trim()
+          $actual = (Get-Content release-under-test/commit.txt -Raw).Trim()
+          @{
+            source_run_id = $env:SOURCE_RUN_ID
+            test_commit = $expected
+            executable_commit = $actual
+          } | ConvertTo-Json | Tee-Object smoke-results/provenance.json
+          if ($actual -cne $expected) {
+            throw "Executable commit mismatch: source run $env:SOURCE_RUN_ID contains $actual, but these tests are from $expected. Select a successful Windows release run built from $expected."
+          }
       - name: Exercise native dialogs
         shell: pwsh
         run: ./scripts/windows-smoke.ps1 -Executable ./release-under-test/nxmd.exe
