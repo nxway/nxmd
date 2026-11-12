@@ -10,7 +10,7 @@ use std::{
 pub struct Vault {
     pub root: PathBuf,
 }
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub path: PathBuf,
     pub directory: bool,
@@ -45,7 +45,31 @@ impl Vault {
         for component in relative.components() {
             if let Component::Normal(name) = component {
                 let name = name.to_string_lossy();
-                if name.contains([':', '\\']) || name.ends_with(['.', ' ']) {
+                let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+                let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                    || ["COM", "LPT"].iter().any(|prefix| {
+                        stem.strip_prefix(prefix).is_some_and(|n| {
+                            matches!(
+                                n,
+                                "1" | "2"
+                                    | "3"
+                                    | "4"
+                                    | "5"
+                                    | "6"
+                                    | "7"
+                                    | "8"
+                                    | "9"
+                                    | "¹"
+                                    | "²"
+                                    | "³"
+                            )
+                        })
+                    });
+                if reserved
+                    || name.chars().any(char::is_control)
+                    || name.contains([':', '\\', '<', '>', '"', '|', '?', '*'])
+                    || name.ends_with(['.', ' '])
+                {
                     bail!("Unsupported Windows filename");
                 }
             }
@@ -69,24 +93,51 @@ impl Vault {
         Ok(path)
     }
     pub fn entries(&self, dir: &Path) -> Result<Vec<Entry>> {
+        let directory_path = self.resolve(dir)?;
+        let metadata = fs::symlink_metadata(&directory_path)?;
+        if metadata.file_type().is_symlink() {
+            bail!("Linked directories are not enumerated");
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                bail!("Reparse directories are not enumerated");
+            }
+        }
         let mut out = Vec::new();
-        for entry in fs::read_dir(self.resolve(dir)?)? {
+        for entry in fs::read_dir(directory_path)? {
             let entry = entry?;
             let name = entry.file_name();
-            if name.to_string_lossy().starts_with('.') || entry.file_type()?.is_symlink() {
+            let kind = match entry.file_type() {
+                Ok(k) => k,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            if name.to_string_lossy().starts_with('.') || kind.is_symlink() {
                 continue;
             }
-            let directory = entry.file_type()?.is_dir();
+            let directory = kind.is_dir();
+            let path = entry.path().strip_prefix(&self.root)?.to_path_buf();
+            // Never enumerate reparse points (including Windows junctions), hidden
+            // metadata, or aliases that cannot pass the normal vault boundary.
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if entry.metadata()?.file_attributes() & (0x400 | 0x2 | 0x4) != 0 {
+                    continue;
+                }
+            }
+            if self.resolve(&path).is_err() {
+                continue;
+            }
             if directory
-                || entry
-                    .path()
+                || crate::images::supported(&path)
+                || path
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("md"))
             {
-                out.push(Entry {
-                    path: entry.path().strip_prefix(&self.root)?.into(),
-                    directory,
-                });
+                out.push(Entry { path, directory });
             }
         }
         out.sort_by_cached_key(|e| {

@@ -1621,6 +1621,7 @@ pub(crate) fn toggle_task_checkbox(line: &str) -> Option<String> {
 /// (W4) when the caret is elsewhere; a line with any other trailing text stays
 /// plain source.
 pub(crate) fn image_line(line: &str) -> Option<(&str, Option<f32>)> {
+    if let Some(src) = crate::image_embed::image_embed(line) { return Some((src, None)); }
     let rest = line.trim().strip_prefix("![")?;
     let close_alt = rest.find("](")?;
     let after_alt = &rest[close_alt + 2..];

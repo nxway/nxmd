@@ -13,6 +13,9 @@ pub struct Assets;
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         Ok(match path {
+            "image" => Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/image.svg") as &[u8],
+            )),
             "note" => Some(std::borrow::Cow::Borrowed(
                 include_bytes!("../assets/icons/note.svg") as &[u8],
             )),

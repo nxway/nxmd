@@ -46,6 +46,7 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 mod markdown_syntax;
+mod image_embed;
 pub use markdown_syntax::{AlertIcons, MathAlign, PropertyIconFn, SyntaxStyle};
 
 mod tables;
@@ -1289,6 +1290,13 @@ impl EditorState {
     /// decoded image; with it, such lines render inline (W4) when the caret is
     /// elsewhere. Without it (or while an image is still loading), the line shows
     /// its raw `![](src)` source.
+    /// nxmd: invalidate presentation after an asynchronous image load; source and
+    /// undo history are untouched.
+    pub fn refresh_images(&mut self, cx: &mut Context<Self>) {
+        *self.shape_memo.borrow_mut() = None;
+        cx.notify();
+    }
+
     pub fn set_block_image_provider(
         &mut self,
         provider: impl Fn(&str) -> Option<Arc<RenderImage>> + 'static,

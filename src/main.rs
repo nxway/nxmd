@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 mod design;
 mod diagnostics;
+mod image_store;
 mod theme;
 mod ui;
 use gpui::*;
@@ -14,6 +15,7 @@ fn main() {
         .run(|cx| {
             zorite_editor::bind_keys(cx);
             cx.bind_keys([
+                KeyBinding::new("f5", ui::RefreshExplorer, None),
                 KeyBinding::new("escape", ui::DismissMenu, None),
                 KeyBinding::new("ctrl-s", ui::Save, None),
                 KeyBinding::new("ctrl-w", ui::CloseTab, None),

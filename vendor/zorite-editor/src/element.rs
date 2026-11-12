@@ -3234,7 +3234,9 @@ fn shape_document(
             }
             _ => px(0.),
         };
+        let wiki_image = img_row.is_some_and(|(_, _, marker)| crate::image_embed::image_embed(&line[marker..]).is_some());
         let widget: Option<Block> = if let Some(st) = md.filter(|_| !is_code)
+            && img_row.is_none()
             && let Some(inner) = zorite_markdown::syntax::embed_line(line)
         {
             // A standalone `![[target]]` transclusion renders as a clickable
@@ -3273,7 +3275,9 @@ fn shape_document(
                 // its edge) instead of revealing the markdown. Delete it via
                 // Backspace/Delete or the right-click menu; WYSIWYG-off still
                 // shows the raw source for hand-editing.
-                block_image
+                let wiki = wiki_image;
+                let editing = wiki && (caret_row == Some(idx) || (selection.0 != selection.1 && selection.0 < line_end && selection.1 > line_start));
+                (!editing).then_some(block_image).flatten()
                     .and_then(|f| f(src))
                     .and_then(|img| {
                         // A live grip resize sizes the image to the drag width, so
@@ -3289,7 +3293,7 @@ fn shape_document(
                             scale_factor,
                         )
                     })
-                    .map(Block::Image)
+                    .map(|mut image| { if wiki { image.resizable = false; } Block::Image(image) })
             }
         } else {
             None
@@ -3343,7 +3347,7 @@ fn shape_document(
         // A selection no longer reveals raw source (Cditor-style: formatting
         // markers are hidden everywhere) — selected lines keep the hidden view;
         // structural markers still come back via `reveal_inline`.
-        let full_source = caret_col.is_some() && chip_line;
+        let full_source = (caret_col.is_some() && chip_line) || (sel_touches && wiki_image);
         // This line's diagnostics, clipped + shifted to line-local byte offsets —
         // used as spell-check squiggles whether the line shows source or hides its
         // markers.

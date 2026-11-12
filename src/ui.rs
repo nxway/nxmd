@@ -1,8 +1,10 @@
+use crate::image_store::{ImageStore, Key as ImageKey, State as ImageState};
 use gpui::*;
 use nxmd::{
     config::Session,
     vault::{Document, Entry, Vault},
 };
+use std::{cell::RefCell, rc::Rc};
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -17,15 +19,31 @@ actions!(
         NewNote,
         CloseTab,
         ToggleSidebar,
-        DismissMenu
+        DismissMenu,
+        RefreshExplorer
     ]
 );
+enum TabContent {
+    Markdown {
+        doc: Document,
+        editor: Entity<EditorState>,
+        _subscription: Subscription,
+    },
+    Image,
+}
 struct Tab {
-    doc: Document,
-    editor: Entity<EditorState>,
+    path: PathBuf,
+    content: TabContent,
     dirty: Option<Instant>,
     conflict: bool,
-    _subscription: Subscription,
+}
+impl Tab {
+    fn editor(&self) -> Option<&Entity<EditorState>> {
+        match &self.content {
+            TabContent::Markdown { editor, .. } => Some(editor),
+            TabContent::Image => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug)]
 enum NewPath {
@@ -35,6 +53,12 @@ enum NewPath {
     Move,
 }
 pub struct Workspace {
+    catalog: Option<nxmd::catalog::Catalog>,
+    catalog_revision: u64,
+    image_revision: u64,
+    images: Rc<RefCell<ImageStore>>,
+    image_task: Option<Task<()>>,
+    import_busy: bool,
     focus: FocusHandle,
     menu: Option<(PathBuf, bool, Point<Pixels>)>,
     creation_dir: Option<PathBuf>,
@@ -78,7 +102,7 @@ impl Workspace {
         let timer = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_millis(500))
+                    .timer(Duration::from_millis(100))
                     .await;
                 if this.update(cx, |this, cx| this.tick(cx)).is_err() {
                     break;
@@ -87,7 +111,14 @@ impl Workspace {
         });
         let paths = session.tabs.clone();
         let active = session.active;
+        let catalog = vault.clone().map(nxmd::catalog::Catalog::new);
         let mut app = Self {
+            catalog,
+            catalog_revision: 0,
+            image_revision: 0,
+            images: Rc::new(RefCell::new(ImageStore::default())),
+            image_task: None,
+            import_busy: false,
             focus: cx.focus_handle(),
             menu: None,
             creation_dir: None,
@@ -114,14 +145,12 @@ impl Workspace {
         if app.tabs.is_empty() {
             window.focus(&app.focus, cx);
         }
-        if let Some(t) = app.tabs.get(app.active) {
-            t.editor.update(cx, |e, cx| e.focus(window, cx));
-        }
+        app.focus_active(window, cx);
         app
     }
     fn persist(&mut self) {
         self.session.vault = self.vault.as_ref().map(|v| v.root.clone());
-        self.session.tabs = self.tabs.iter().map(|t| t.doc.path.clone()).collect();
+        self.session.tabs = self.tabs.iter().map(|t| t.path.clone()).collect();
         self.session.active = self.active;
         self.session.sidebar_width = self.sidebar_width;
         self.session.sidebar_visible = self.sidebar;
@@ -129,77 +158,121 @@ impl Workspace {
             self.status = format!("Session: {e}");
         }
     }
+    fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(t) = self.tabs.get(self.active) {
+            self.images.borrow_mut().activate(t.path.clone());
+            if let Some(e) = t.editor() {
+                e.update(cx, |e, cx| e.focus(window, cx));
+            } else {
+                window.focus(&self.focus, cx);
+            }
+        } else {
+            window.focus(&self.focus, cx);
+        }
+    }
     fn refresh(&mut self) {
+        if let Some(catalog) = &self.catalog {
+            catalog.refresh();
+        }
+        self.rebuild_tree();
+    }
+    fn rebuild_tree(&mut self) {
         self.entries.clear();
         fn visit(
-            v: &Vault,
+            snapshot: &nxmd::catalog::Snapshot,
             dir: &Path,
             expanded: &HashSet<PathBuf>,
             depth: usize,
             rows: &mut Vec<(Entry, usize)>,
-        ) -> anyhow::Result<()> {
-            for e in v.entries(dir)? {
-                let descend = e.directory && expanded.contains(&e.path);
-                let path = e.path.clone();
-                rows.push((e, depth));
-                if descend {
-                    visit(v, &path, expanded, depth + 1, rows)?;
+        ) {
+            if let Some(entries) = snapshot.directories.get(dir) {
+                for e in entries.iter() {
+                    rows.push((e.clone(), depth));
+                    if e.directory && expanded.contains(&e.path) {
+                        visit(snapshot, &e.path, expanded, depth + 1, rows);
+                    }
                 }
             }
-            Ok(())
         }
-        if let Some(v) = &self.vault {
-            if let Err(e) = visit(v, Path::new(""), &self.expanded, 0, &mut self.entries) {
-                self.status = e.to_string();
-            }
+        if let Some(catalog) = &self.catalog {
+            visit(
+                &catalog.snapshot(),
+                Path::new(""),
+                &self.expanded,
+                0,
+                &mut self.entries,
+            );
         }
     }
+    fn refresh_explorer(&mut self, _: &RefreshExplorer, _: &mut Window, cx: &mut Context<Self>) {
+        self.images.borrow_mut().invalidate();
+        self.refresh();
+        cx.notify();
+    }
     fn open(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(i) = self.tabs.iter().position(|t| t.doc.path == path) {
+        if let Some(i) = self.tabs.iter().position(|t| t.path == path) {
             self.active = i;
-            self.tabs[i].editor.update(cx, |e, cx| e.focus(window, cx));
+            self.focus_active(window, cx);
             return;
         }
         let Some(v) = &self.vault else {
             return;
         };
+        if nxmd::images::supported(&path) {
+            if let Err(e) = v.resolve(&path) {
+                self.status = e.to_string();
+                return;
+            }
+            self.tabs.push(Tab {
+                path,
+                content: TabContent::Image,
+                dirty: None,
+                conflict: false,
+            });
+            self.active = self.tabs.len() - 1;
+            self.focus_active(window, cx);
+            self.persist();
+            cx.notify();
+            return;
+        }
         match v.load(&path) {
             Ok(doc) => {
                 let editor = cx.new(|cx| {
                     let mut e = EditorState::new(window, cx).with_text(doc.text.clone());
                     e.set_markdown_style(crate::theme::markdown_style(), cx);
-                    let vault = v.clone();
+                    let images = self.images.clone();
                     let note = path.clone();
-                    let cache = std::cell::RefCell::new(std::collections::HashMap::new());
                     e.set_block_image_provider(move |src| {
-                        if let Some(img) = cache.borrow().get(src) {
-                            return Some(std::sync::Arc::clone(img));
+                        match images.borrow_mut().request(ImageKey {
+                            note: note.clone(),
+                            source: src.into(),
+                        }) {
+                            ImageState::Ready { image, .. } => Some(image),
+                            _ => None,
                         }
-                        let p = nxmd::attachments::resolve(&vault, &note, src).ok()?;
-                        if std::fs::metadata(&p).ok()?.len() > 32 * 1024 * 1024 {
-                            return None;
+                    });
+                    let images = self.images.clone();
+                    let note = path.clone();
+                    e.set_block_chip_provider(move |src| {
+                        match images.borrow_mut().request(ImageKey {
+                            note: note.clone(),
+                            source: src.into(),
+                        }) {
+                            ImageState::Error(error) => {
+                                Some(format!("Image unavailable: {error}").into())
+                            }
+                            _ => None,
                         }
-                        let mut reader = image::ImageReader::open(p)
-                            .ok()?
-                            .with_guessed_format()
-                            .ok()?;
-                        let mut limits = image::Limits::default();
-                        limits.max_image_width = Some(8192);
-                        limits.max_image_height = Some(8192);
-                        reader.limits(limits);
-                        let mut rgba = reader.decode().ok()?.into_rgba8();
-                        for pixel in rgba.chunks_exact_mut(4) {
-                            pixel.swap(0, 2);
-                        }
-                        let img = std::sync::Arc::new(RenderImage::new([image::Frame::new(rgba)]));
-                        cache.borrow_mut().insert(src.to_string(), img.clone());
-                        Some(img)
                     });
                     e
                 });
                 let subscription = cx.subscribe(&editor, |this, ed, event: &EditorEvent, cx| {
                     if matches!(event, EditorEvent::Changed) {
-                        if let Some(tab) = this.tabs.iter_mut().find(|t| t.editor == ed) {
+                        if let Some(tab) = this
+                            .tabs
+                            .iter_mut()
+                            .find(|t| t.editor().is_some_and(|e| *e == ed))
+                        {
                             tab.dirty = Some(Instant::now());
                         }
                         cx.notify();
@@ -207,13 +280,17 @@ impl Workspace {
                 });
                 editor.update(cx, |e, cx| e.focus(window, cx));
                 self.tabs.push(Tab {
-                    doc,
-                    editor,
+                    path,
+                    content: TabContent::Markdown {
+                        doc,
+                        editor,
+                        _subscription: subscription,
+                    },
                     dirty: None,
                     conflict: false,
-                    _subscription: subscription,
                 });
                 self.active = self.tabs.len() - 1;
+                self.focus_active(window, cx);
                 self.persist();
                 cx.notify();
             }
@@ -225,8 +302,11 @@ impl Workspace {
             return false;
         };
         let t = &mut self.tabs[i];
-        t.doc.text = t.editor.read(cx).text().to_owned();
-        match v.save(&mut t.doc) {
+        let TabContent::Markdown { doc, editor, .. } = &mut t.content else {
+            return true;
+        };
+        doc.text = editor.read(cx).text().to_owned();
+        match v.save(doc) {
             Ok(()) => {
                 t.dirty = None;
                 t.conflict = false;
@@ -241,6 +321,7 @@ impl Workspace {
         }
     }
     fn tick(&mut self, cx: &mut Context<Self>) {
+        self.poll_images(cx);
         let check_external = Instant::now() >= self.next_external_check;
         if check_external {
             self.next_external_check = Instant::now() + Duration::from_secs(2);
@@ -251,7 +332,10 @@ impl Workspace {
                 && self
                     .vault
                     .as_ref()
-                    .is_some_and(|v| v.changed(&self.tabs[i].doc))
+                    .is_some_and(|v| match &self.tabs[i].content {
+                        TabContent::Markdown { doc, .. } => v.changed(doc),
+                        _ => false,
+                    })
             {
                 self.tabs[i].conflict = true;
                 self.status =
@@ -272,28 +356,197 @@ impl Workspace {
         if let Some(clip) = cx.read_from_clipboard() {
             for entry in clip.entries() {
                 if let ClipboardEntry::Image(image) = entry {
-                    self.insert_image(image.bytes(), cx);
+                    if image.bytes().len() > nxmd::images::MAX_ENCODED {
+                        self.status = "Clipboard image exceeds 32 MiB".into();
+                        cx.notify();
+                        return;
+                    }
+                    self.insert_images(vec![(image.bytes().to_vec(), None)], cx);
                     return;
                 }
             }
         }
         cx.propagate();
     }
-    fn insert_image(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+    fn insert_images(&mut self, inputs: Vec<(Vec<u8>, Option<PathBuf>)>, cx: &mut Context<Self>) {
+        if inputs.len() > 16 {
+            self.status = "Import at most 16 images at a time".into();
+            cx.notify();
+            return;
+        }
+        if self.import_busy {
+            self.status = "An image import is already running".into();
+            cx.notify();
+            return;
+        }
         let Some(tab) = self.tabs.get(self.active) else {
             return;
         };
-        let Some(v) = &self.vault else {
+        let Some(editor) = tab.editor().cloned() else {
+            self.status = "Select a Markdown note before inserting an image".into();
+            cx.notify();
             return;
         };
-        match nxmd::attachments::import(v, &tab.doc.path, bytes) {
-            Ok(reference) => tab.editor.update(cx, |e, cx| {
-                let p = e.cursor();
-                e.replace_range(p..p, &format!("\n{reference}\n"), cx);
-            }),
-            Err(e) => self.status = e.to_string(),
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        let note = tab.path.clone();
+        let original = editor.read(cx).text().to_owned();
+        let at = editor.read(cx).cursor();
+        self.import_busy = true;
+        let task = cx.background_executor().spawn({
+            let vault = vault.clone();
+            let note = note.clone();
+            async move {
+                inputs
+                    .into_iter()
+                    .map(|(bytes, source)| {
+                        let bytes = match source {
+                            Some(p) => nxmd::images::read(&p)?,
+                            None => bytes,
+                        };
+                        nxmd::attachments::import(&vault, &note, &bytes)
+                    })
+                    .collect::<Vec<anyhow::Result<String>>>()
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.import_busy = false;
+                if this.vault.as_ref().map(|v| &v.root) != Some(&vault.root) {
+                    return;
+                }
+                let mut references = Vec::new();
+                let mut errors = Vec::new();
+                for result in result {
+                    match result {
+                        Ok(reference) => references.push(reference),
+                        Err(e) => errors.push(e.to_string()),
+                    }
+                }
+                if !references.is_empty() {
+                    let reference = references.join("\n");
+                    if let Some(tab) = this
+                        .tabs
+                        .iter()
+                        .find(|t| t.editor() == Some(&editor) && t.path == note)
+                    {
+                        let editor = tab.editor().unwrap();
+                        // Do not insert at a stale byte offset if typing continued during decode.
+                        editor.update(cx, |e, cx| {
+                            let at = if e.text() == original { at } else { e.cursor() };
+                            e.replace_range(at..at, &format!("\n{reference}\n"), cx);
+                        });
+                        log::info!("image import completed: {reference}");
+                    } else {
+                        this.status = format!(
+                            "Attachment imported; note closed before insertion: {reference}"
+                        );
+                    }
+                    this.refresh();
+                }
+                if !errors.is_empty() {
+                    this.status = format!("Image import: {}", errors.join("; "));
+                    log::error!("{}", this.status);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    fn poll_images(&mut self, cx: &mut Context<Self>) {
+        let Some(catalog) = &self.catalog else {
+            return;
+        };
+        let snapshot = catalog.snapshot();
+        if snapshot.revision != self.catalog_revision {
+            self.catalog_revision = snapshot.revision;
+            if snapshot.image_revision != self.image_revision {
+                self.image_revision = snapshot.image_revision;
+                self.images.borrow_mut().invalidate();
+                for tab in &self.tabs {
+                    if let Some(editor) = tab.editor() {
+                        editor.update(cx, |e, cx| e.refresh_images(cx));
+                    }
+                }
+            }
+            if let Some(error) = &snapshot.error {
+                self.status = error.clone();
+            } else if !snapshot.ready {
+                self.status = "Indexing local image filenames…".into();
+            } else if self.status == "Indexing local image filenames…" {
+                self.status = "Local Markdown · Live Preview".into();
+            }
+            self.rebuild_tree();
+            cx.notify();
         }
-        cx.notify();
+        if !snapshot.ready || self.image_task.is_some() {
+            return;
+        }
+        let Some(key) = self.images.borrow_mut().next() else {
+            return;
+        };
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        let generation = self.images.borrow().generation;
+        let job_key = key.clone();
+        let index = snapshot.images.clone();
+        let known = self.images.borrow().known_paths();
+        let job = cx.background_executor().spawn(async move {
+            let path = if job_key.source.is_empty() {
+                vault.resolve(&job_key.note)?
+            } else {
+                nxmd::attachments::resolve_indexed(&vault, &job_key.note, &job_key.source, &index)?
+            };
+            let path = dunce::canonicalize(path)?;
+            if known.contains(&path) {
+                return Ok((path, None));
+            }
+            let mut decoded = nxmd::images::decode(&nxmd::images::read(&path)?)?;
+            for pixel in decoded.rgba.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            Ok((path, Some(decoded)))
+        });
+        self.image_task = Some(cx.spawn(async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |this, cx| {
+                this.image_task = None;
+                if this.images.borrow().generation != generation {
+                    return;
+                }
+                if let Ok((_, Some(d))) = &result {
+                    log::info!(
+                        "image decoded: {} ({} x {})",
+                        if key.source.is_empty() {
+                            key.note.display().to_string()
+                        } else {
+                            key.source.clone()
+                        },
+                        d.original.0,
+                        d.original.1
+                    );
+                }
+                if let Err(error) = &result {
+                    log::warn!("image unavailable: {}: {error}", key.source);
+                }
+                match result {
+                    Ok((path, decoded)) => {
+                        this.images.borrow_mut().complete_loaded(key, path, decoded)
+                    }
+                    Err(e) => this.images.borrow_mut().complete(key, Err(e)),
+                }
+                if let Some(error) = this.images.borrow().last_error.clone() {
+                    this.status = error;
+                }
+                if let Some(editor) = this.tabs.get(this.active).and_then(Tab::editor) {
+                    editor.update(cx, |e, cx| e.refresh_images(cx));
+                }
+                cx.notify();
+            });
+        }));
     }
     fn save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
         if !self.tabs.is_empty() {
@@ -333,6 +586,10 @@ impl Workspace {
                             }
                             match Vault::open(p) {
                                 Ok(v) => {
+                                    this.catalog = Some(nxmd::catalog::Catalog::new(v.clone()));
+                                    this.catalog_revision = 0;
+                                    this.image_revision = 0;
+                                    this.images.borrow_mut().invalidate();
                                     this.vault = Some(v);
                                     this.tabs.clear();
                                     window.focus(&this.focus, cx);
@@ -371,12 +628,9 @@ impl Workspace {
             return;
         }
         self.active = nxmd::tabs::active_after_close(self.active, index, self.tabs.len());
-        self.tabs.remove(index);
-        if let Some(t) = self.tabs.get(self.active) {
-            t.editor.update(cx, |e, cx| e.focus(window, cx));
-        } else {
-            window.focus(&self.focus, cx);
-        }
+        let closed = self.tabs.remove(index);
+        self.images.borrow_mut().close(&closed.path);
+        self.focus_active(window, cx);
         self.menu = None;
         self.persist();
         cx.notify();
@@ -403,12 +657,13 @@ impl Workspace {
             }
         } else {
             self.open(path.clone(), window, cx);
+            if nxmd::images::supported(&path) {
+                self.persist();
+                cx.notify();
+                return;
+            }
             self.persist();
-            if self
-                .tabs
-                .get(self.active)
-                .is_some_and(|t| t.doc.path == path)
-            {
+            if self.tabs.get(self.active).is_some_and(|t| t.path == path) {
                 match action {
                     0 => self.move_note(window, cx),
                     1 => self.save_copy(window, cx),
@@ -450,12 +705,13 @@ impl Workspace {
             return;
         };
         let tab = self.tabs.get(self.active);
-        if matches!(kind, NewPath::Move | NewPath::Copy) && tab.is_none() {
+        if matches!(kind, NewPath::Move | NewPath::Copy) && tab.and_then(Tab::editor).is_none() {
             return;
         }
-        let old = tab.map(|t| t.doc.path.clone());
+        let old = tab.map(|t| t.path.clone());
         let text = tab
-            .map(|t| t.editor.read(cx).text().to_owned())
+            .and_then(Tab::editor)
+            .map(|e| e.read(cx).text().to_owned())
             .unwrap_or_default();
         let suggested = match kind {
             NewPath::Folder => "New folder".into(),
@@ -508,7 +764,7 @@ impl Workspace {
                             let i = this
                                 .tabs
                                 .iter()
-                                .position(|t| t.doc.path == old)
+                                .position(|t| t.path == old)
                                 .ok_or_else(|| anyhow::anyhow!("Source tab closed"))?;
                             if !this.save_tab(i, cx) {
                                 return Ok(());
@@ -536,7 +792,7 @@ impl Workspace {
         if self.dialog_busy || self.tabs.is_empty() || !self.save_tab(self.active, cx) {
             return;
         }
-        let path = self.tabs[self.active].doc.path.clone();
+        let path = self.tabs[self.active].path.clone();
         let vault = self.vault.clone().unwrap();
         self.dialog_busy = true;
         log::info!("dialog trash requested");
@@ -558,7 +814,7 @@ impl Workspace {
                 if matches!(result, Ok(0))
                     && this.vault.as_ref().map(|v| &v.root) == Some(&vault.root)
                 {
-                    if let Some(i) = this.tabs.iter().position(|t| t.doc.path == path) {
+                    if let Some(i) = this.tabs.iter().position(|t| t.path == path) {
                         if !this.save_tab(i, cx) {
                             return;
                         }
@@ -586,10 +842,7 @@ impl Workspace {
         let path = entry.path.clone();
         let directory = entry.directory;
         let expanded = self.expanded.contains(&path);
-        let active = self
-            .tabs
-            .get(self.active)
-            .is_some_and(|t| t.doc.path == path);
+        let active = self.tabs.get(self.active).is_some_and(|t| t.path == path);
         let name = path
             .file_name()
             .unwrap_or_default()
@@ -621,7 +874,14 @@ impl Workspace {
                 div().w(px(12.)).into_any_element()
             })
             .child(
-                icon(if directory { "folder" } else { "note" }).text_color(rgb(if directory {
+                icon(if directory {
+                    "folder"
+                } else if nxmd::images::supported(&path) {
+                    "image"
+                } else {
+                    "note"
+                })
+                .text_color(rgb(if directory {
                     MUTED
                 } else if active {
                     ACCENT
@@ -652,7 +912,14 @@ impl Workspace {
                     if !s.expanded.remove(&path) {
                         s.expanded.insert(path.clone());
                     }
-                    s.refresh();
+                    let began = Instant::now();
+                    s.rebuild_tree();
+                    log::info!(
+                        "explorer toggle: {} rows={} elapsed_us={}",
+                        path.display(),
+                        s.entries.len(),
+                        began.elapsed().as_micros()
+                    );
                 } else {
                     s.open(path.clone(), w, cx);
                     s.persist();
@@ -664,7 +931,9 @@ impl Workspace {
     fn menu_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::design::*;
         let (path, directory, position) = self.menu.clone()?;
-        let names: Vec<&'static str> = if directory {
+        let names: Vec<&'static str> = if nxmd::images::supported(&path) && !directory {
+            vec!["Open image"]
+        } else if directory {
             vec!["New note here", "New folder here"]
         } else {
             vec!["Rename / move…", "Save as copy…", "Move to trash…"]
@@ -729,7 +998,7 @@ impl Workspace {
     }
 }
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         use crate::design::*;
         let vault_name = self
             .vault
@@ -739,11 +1008,13 @@ impl Render for Workspace {
             .unwrap_or_else(|| "Your workspace".into());
         let active = self.tabs.get(self.active);
         let active_path = active
-            .map(|t| t.doc.path.to_string_lossy().to_string())
+            .map(|t| t.path.to_string_lossy().to_string())
             .unwrap_or_else(|| "No note selected".into());
         let save_label = active
             .map(|t| {
-                if t.conflict {
+                if matches!(t.content, TabContent::Image) {
+                    "Read-only image"
+                } else if t.conflict {
                     "External change"
                 } else if t.dirty.is_some() {
                     "Saving…"
@@ -757,7 +1028,10 @@ impl Render for Workspace {
         } else {
             MUTED
         };
-        let editor = active.map(|t| t.editor.clone());
+        let editor = active.and_then(Tab::editor).cloned();
+        let image_path = active
+            .filter(|t| matches!(t.content, TabContent::Image))
+            .map(|t| t.path.clone());
         let tabs = self
             .tabs
             .iter()
@@ -765,13 +1039,12 @@ impl Render for Workspace {
             .map(|(i, t)| {
                 let selected = i == self.active;
                 let title = t
-                    .doc
                     .path
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                let tooltip: SharedString = t.doc.path.to_string_lossy().to_string().into();
+                let tooltip: SharedString = t.path.to_string_lossy().to_string().into();
                 div()
                     .id(("tab", i))
                     .h(px(44.))
@@ -788,11 +1061,19 @@ impl Render for Workspace {
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(SURFACE)))
                     .tooltip(move |_, cx| tip(tooltip.clone(), cx))
-                    .child(icon("note").size(px(14.)).text_color(rgb(if selected {
-                        ACCENT
-                    } else {
-                        MUTED
-                    })))
+                    .child(
+                        icon(if matches!(t.content, TabContent::Image) {
+                            "image"
+                        } else {
+                            "note"
+                        })
+                        .size(px(14.))
+                        .text_color(rgb(if selected {
+                            ACCENT
+                        } else {
+                            MUTED
+                        })),
+                    )
                     .child(div().flex_1().min_w_0().text_ellipsis().child(title))
                     .child(
                         div()
@@ -826,7 +1107,7 @@ impl Render for Workspace {
                     .on_click(cx.listener(move |s, _, w, cx| {
                         s.active = i;
                         s.menu = None;
-                        s.tabs[i].editor.update(cx, |e, cx| e.focus(w, cx));
+                        s.focus_active(w, cx);
                         s.persist();
                         cx.notify();
                     }))
@@ -934,7 +1215,57 @@ impl Render for Workspace {
                     .text_color(rgb(MUTED))
                     .child("nxmd  /  a space for your words"),
             );
-        let main_content = if let Some(editor) = editor {
+        let is_image = image_path.is_some();
+        let main_content = if let Some(path) = image_path {
+            let state = self.images.borrow_mut().request(ImageKey {
+                note: path.clone(),
+                source: String::new(),
+            });
+            let content = match state {
+                ImageState::Ready { image, size, .. } => {
+                    let viewport = window.viewport_size();
+                    let available = (
+                        f32::from(viewport.width)
+                            - if self.sidebar {
+                                self.sidebar_width + 67.
+                            } else {
+                                64.
+                            },
+                        f32::from(viewport.height) - 174.,
+                    );
+                    let (w, h) = nxmd::images::fit(size, available);
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_3()
+                        .child(img(image).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain))
+                        .child(
+                            div()
+                                .text_color(rgb(MUTED))
+                                .child(format!("{} × {} · Read only", size.0, size.1)),
+                        )
+                        .into_any_element()
+                }
+                ImageState::Error(error) => div()
+                    .text_color(rgb(DANGER))
+                    .child(error)
+                    .into_any_element(),
+                _ => div()
+                    .text_color(rgb(MUTED))
+                    .child("Loading image…")
+                    .into_any_element(),
+            };
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_6()
+                .child(content)
+                .into_any_element()
+        } else if let Some(editor) = editor {
             div()
                 .id("document")
                 .flex_1()
@@ -1011,6 +1342,7 @@ impl Render for Workspace {
             .text_color(rgb(TEXT))
             .font_family("Segoe UI")
             .text_size(px(13.))
+            .on_action(cx.listener(Self::refresh_explorer))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::dismiss_menu))
@@ -1019,12 +1351,14 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_vault))
             .on_action(cx.listener(Self::new_note))
             .on_drop(cx.listener(|s, paths: &ExternalPaths, _, cx| {
-                for path in paths.paths() {
-                    match std::fs::read(path) {
-                        Ok(b) => s.insert_image(&b, cx),
-                        Err(e) => s.status = e.to_string(),
-                    }
-                }
+                s.insert_images(
+                    paths
+                        .paths()
+                        .iter()
+                        .map(|p| (Vec::new(), Some(p.clone())))
+                        .collect(),
+                    cx,
+                );
             }))
             .on_mouse_move(cx.listener(|s, e: &MouseMoveEvent, _, cx| {
                 if s.resizing && e.pressed_button != Some(MouseButton::Left) {
@@ -1125,7 +1459,11 @@ impl Render for Workspace {
                                             .text_ellipsis()
                                             .child(active_path.clone()),
                                     )
-                                    .child(div().text_color(rgb(ACCENT)).child("LIVE PREVIEW")),
+                                    .child(div().text_color(rgb(ACCENT)).child(if is_image {
+                                        "IMAGE"
+                                    } else {
+                                        "LIVE PREVIEW"
+                                    })),
                             )
                             .child(main_content),
                     ),
@@ -1167,7 +1505,11 @@ impl Render for Workspace {
                                 },
                             ),
                     )
-                    .child(div().text_color(rgb(MUTED)).child("Markdown  ·  UTF-8")),
+                    .child(div().text_color(rgb(MUTED)).child(if is_image {
+                        "Image  ·  Read only"
+                    } else {
+                        "Markdown  ·  UTF-8"
+                    })),
             )
             .children(menu)
     }

@@ -31,6 +31,8 @@ jobs:
         run: cargo test --locked --no-default-features
       - name: Build native release executable
         run: cargo build --locked --release
+      - name: Test bounded native image cache
+        run: cargo test --locked --release --bin nxmd
       - name: Inspect native dependencies and package executable
         shell: pwsh
         run: ./scripts/windows-package.ps1
@@ -43,7 +45,7 @@ jobs:
           retention-days: 30
       - name: Native window smoke test
         shell: pwsh
-        timeout-minutes: 3
+        timeout-minutes: 6
         run: ./scripts/windows-smoke.ps1 -Executable ./target/release/nxmd.exe
       # Historical artifacts expire; their absence must not block a release.
       - name: Download comparison baseline
@@ -52,7 +54,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
-          run-id: 43005240014
+          run-id: 43151664774
           pattern: nxmd-windows-x64-*
           merge-multiple: true
           path: baseline-release
