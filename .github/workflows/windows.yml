@@ -1,72 +1,74 @@
-name: Windows release
+name: Publish verified alpha artifact
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 permissions:
-  contents: read
   actions: read
-concurrency:
-  group: windows-release-${{ github.ref }}
-  cancel-in-progress: true
+  contents: write
 jobs:
-  build:
-    runs-on: windows-latest
-    timeout-minutes: 90
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
-      CARGO_TERM_COLOR: always
-      CARGO_BUILD_JOBS: 2
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Record runner and compiler
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force artifacts | Out-Null
-          rustc -Vv | Tee-Object artifacts/toolchain.txt
-          cargo -V | Tee-Object -Append artifacts/toolchain.txt
-          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, OSArchitecture | Out-String | Tee-Object -Append artifacts/toolchain.txt
-          git rev-parse HEAD | Set-Content artifacts/commit.txt
-      - name: Test filesystem and preservation on Windows
-        run: cargo test --locked --no-default-features
-      - name: Build native release executable
-        run: cargo build --locked --release
-      - name: Test bounded native image cache
-        run: cargo test --locked --release --bin nxmd
-      - name: Inspect native dependencies and package executable
-        shell: pwsh
-        run: ./scripts/windows-package.ps1
-      - name: Upload Windows executable
-        uses: actions/upload-artifact@v4
-        with:
-          name: nxmd-windows-x64-${{ github.sha }}
-          path: artifacts/
-          if-no-files-found: error
-          retention-days: 30
-      - name: Native window smoke test
-        shell: pwsh
-        timeout-minutes: 6
-        run: ./scripts/windows-smoke.ps1 -Executable ./target/release/nxmd.exe
-      # Historical artifacts expire; their absence must not block a release.
-      - name: Download comparison baseline
-        id: baseline
-        continue-on-error: true
+      - name: Download the verified Release 18 binary (no rebuild)
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
-          run-id: 43151664774
-          pattern: nxmd-windows-x64-*
-          merge-multiple: true
-          path: baseline-release
-      - name: Compare native process metrics
-        if: steps.baseline.outcome == 'success'
-        shell: pwsh
-        run: ./scripts/windows-performance.ps1 -Baseline ./baseline-release/nxmd.exe -Candidate ./target/release/nxmd.exe
-      - name: Upload smoke-test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nxmd-windows-validation-${{ github.sha }}
-          path: smoke-results/
-          if-no-files-found: warn
-          retention-days: 30
+          repository: nxway/nxmd
+          run-id: 43239301300
+          name: nxmd-windows-x64-c8d3079261169e7bac0956c4b6fd1a5e604a10da
+          path: verified-build
+      - name: Verify provenance and prepare the Windows ZIP
+        shell: python
+        run: |
+          from pathlib import Path
+          import hashlib, json, re, shutil, subprocess, zipfile
+          commit = "c8d3079261169e7bac0956c4b6fd1a5e604a10da"
+          expected_exe = "5a1bad1fae83d9764bb4858dc4fb1df8b4b705b3cdea68615cfcb6959f3016d2"
+          src = Path("verified-build")
+          assert (src / "commit.txt").read_text().strip() == commit
+          recorded = re.search(r"Hash\s*:\s*([A-Fa-f0-9]{64})", (src / "SHA256.txt").read_text()).group(1).lower()
+          assert recorded == expected_exe
+          assert hashlib.sha256((src / "nxmd.exe").read_bytes()).hexdigest() == expected_exe
+          payload = json.loads(r'''{
+            "LICENSE.txt": "MIT License\r\n\r\nCopyright (c) 2026 nxmd contributors\r\n\r\nPermission is hereby granted, free of charge, to any person obtaining a copy\r\nof this software and associated documentation files (the \"Software\"), to deal\r\nin the Software without restriction, including without limitation the rights\r\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\r\ncopies of the Software, and to permit persons to whom the Software is\r\nfurnished to do so, subject to the following conditions:\r\n\r\nThe above copyright notice and this permission notice shall be included in all\r\ncopies or substantial portions of the Software.\r\n\r\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\r\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\r\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\r\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\r\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\r\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\r\nSOFTWARE.\r\n",
+            "LICENSE-APACHE-2.0.txt": "Copyright 2022 - 2025 Zed Industries, Inc.\n\n\n   Licensed under the Apache License, Version 2.0 (the \"License\");\n   you may not use this file except in compliance with the License.\n   You may obtain a copy of the License at\n\n\n       http://www.apache.org/licenses/LICENSE-2.0\n\n\n   Unless required by applicable law or agreed to in writing, software\n   distributed under the License is distributed on an \"AS IS\" BASIS,\n   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n   See the License for the specific language governing permissions and\n   limitations under the License.\n\n\n\n\nApache License\n                           Version 2.0, January 2004\n                        http://www.apache.org/licenses/\n\n\n   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n\n\n   1. Definitions.\n\n\n      \"License\" shall mean the terms and conditions for use, reproduction,\n      and distribution as defined by Sections 1 through 9 of this document.\n\n\n      \"Licensor\" shall mean the copyright owner or entity authorized by\n      the copyright owner that is granting the License.\n\n\n      \"Legal Entity\" shall mean the union of the acting entity and all\n      other entities that control, are controlled by, or are under common\n      control with that entity. For the purposes of this definition,\n      \"control\" means (i) the power, direct or indirect, to cause the\n      direction or management of such entity, whether by contract or\n      otherwise, or (ii) ownership of fifty percent (50%) or more of the\n      outstanding shares, or (iii) beneficial ownership of such entity.\n\n\n      \"You\" (or \"Your\") shall mean an individual or Legal Entity\n      exercising permissions granted by this License.\n\n\n      \"Source\" form shall mean the preferred form for making modifications,\n      including but not limited to software source code, documentation\n      source, and configuration files.\n\n\n      \"Object\" form shall mean any form resulting from mechanical\n      transformation or translation of a Source form, including but\n      not limited to compiled object code, generated documentation,\n      and conversions to other media types.\n\n\n      \"Work\" shall mean the work of authorship, whether in Source or\n      Object form, made available under the License, as indicated by a\n      copyright notice that is included in or attached to the work\n      (an example is provided in the Appendix below).\n\n\n      \"Derivative Works\" shall mean any work, whether in Source or Object\n      form, that is based on (or derived from) the Work and for which the\n      editorial revisions, annotations, elaborations, or other modifications\n      represent, as a whole, an original work of authorship. For the purposes\n      of this License, Derivative Works shall not include works that remain\n      separable from, or merely link (or bind by name) to the interfaces of,\n      the Work and Derivative Works thereof.\n\n\n      \"Contribution\" shall mean any work of authorship, including\n      the original version of the Work and any modifications or additions\n      to that Work or Derivative Works thereof, that is intentionally\n      submitted to Licensor for inclusion in the Work by the copyright owner\n      or by an individual or Legal Entity authorized to submit on behalf of\n      the copyright owner. For the purposes of this definition, \"submitted\"\n      means any form of electronic, verbal, or written communication sent\n      to the Licensor or its representatives, including but not limited to\n      communication on electronic mailing lists, source code control systems,\n      and issue tracking systems that are managed by, or on behalf of, the\n      Licensor for the purpose of discussing and improving the Work, but\n      excluding communication that is conspicuously marked or otherwise\n      designated in writing by the copyright owner as \"Not a Contribution.\"\n\n\n      \"Contributor\" shall mean Licensor and any individual or Legal Entity\n      on behalf of whom a Contribution has been received by Licensor and\n      subsequently incorporated within the Work.\n\n\n   2. Grant of Copyright License. Subject to the terms and conditions of\n      this License, each Contributor hereby grants to You a perpetual,\n      worldwide, non-exclusive, no-charge, royalty-free, irrevocable\n      copyright license to reproduce, prepare Derivative Works of,\n      publicly display, publicly perform, sublicense, and distribute the\n      Work and such Derivative Works in Source or Object form.\n\n\n   3. Grant of Patent License. Subject to the terms and conditions of\n      this License, each Contributor hereby grants to You a perpetual,\n      worldwide, non-exclusive, no-charge, royalty-free, irrevocable\n      (except as stated in this section) patent license to make, have made,\n      use, offer to sell, sell, import, and otherwise transfer the Work,\n      where such license applies only to those patent claims licensable\n      by such Contributor that are necessarily infringed by their\n      Contribution(s) alone or by combination of their Contribution(s)\n      with the Work to which such Contribution(s) was submitted. If You\n      institute patent litigation against any entity (including a\n      cross-claim or counterclaim in a lawsuit) alleging that the Work\n      or a Contribution incorporated within the Work constitutes direct\n      or contributory patent infringement, then any patent licenses\n      granted to You under this License for that Work shall terminate\n      as of the date such litigation is filed.\n\n\n   4. Redistribution. You may reproduce and distribute copies of the\n      Work or Derivative Works thereof in any medium, with or without\n      modifications, and in Source or Object form, provided that You\n      meet the following conditions:\n\n\n      (a) You must give any other recipients of the Work or\n          Derivative Works a copy of this License; and\n\n\n      (b) You must cause any modified files to carry prominent notices\n          stating that You changed the files; and\n\n\n      (c) You must retain, in the Source form of any Derivative Works\n          that You distribute, all copyright, patent, trademark, and\n          attribution notices from the Source form of the Work,\n          excluding those notices that do not pertain to any part of\n          the Derivative Works; and\n\n\n      (d) If the Work includes a \"NOTICE\" text file as part of its\n          distribution, then any Derivative Works that You distribute must\n          include a readable copy of the attribution notices contained\n          within such NOTICE file, excluding those notices that do not\n          pertain to any part of the Derivative Works, in at least one\n          of the following places: within a NOTICE text file distributed\n          as part of the Derivative Works; within the Source form or\n          documentation, if provided along with the Derivative Works; or,\n          within a display generated by the Derivative Works, if and\n          wherever such third-party notices normally appear. The contents\n          of the NOTICE file are for informational purposes only and\n          do not modify the License. You may add Your own attribution\n          notices within Derivative Works that You distribute, alongside\n          or as an addendum to the NOTICE text from the Work, provided\n          that such additional attribution notices cannot be construed\n          as modifying the License.\n\n\n      You may add Your own copyright statement to Your modifications and\n      may provide additional or different license terms and conditions\n      for use, reproduction, or distribution of Your modifications, or\n      for any such Derivative Works as a whole, provided Your use,\n      reproduction, and distribution of the Work otherwise complies with\n      the conditions stated in this License.\n\n\n   5. Submission of Contributions. Unless You explicitly state otherwise,\n      any Contribution intentionally submitted for inclusion in the Work\n      by You to the Licensor shall be under the terms and conditions of\n      this License, without any additional terms or conditions.\n      Notwithstanding the above, nothing herein shall supersede or modify\n      the terms of any separate license agreement you may have executed\n      with Licensor regarding such Contributions.\n\n\n   6. Trademarks. This License does not grant permission to use the trade\n      names, trademarks, service marks, or product names of the Licensor,\n      except as required for reasonable and customary use in describing the\n      origin of the Work and reproducing the content of the NOTICE file.\n\n\n   7. Disclaimer of Warranty. Unless required by applicable law or\n      agreed to in writing, Licensor provides the Work (and each\n      Contributor provides its Contributions) on an \"AS IS\" BASIS,\n      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or\n      implied, including, without limitation, any warranties or conditions\n      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A\n      PARTICULAR PURPOSE. You are solely responsible for determining the\n      appropriateness of using or redistributing the Work and assume any\n      risks associated with Your exercise of permissions under this License.\n\n\n   8. Limitation of Liability. In no event and under no legal theory,\n      whether in tort (including negligence), contract, or otherwise,\n      unless required by applicable law (such as deliberate and grossly\n      negligent acts) or agreed to in writing, shall any Contributor be\n      liable to You for damages, including any direct, indirect, special,\n      incidental, or consequential damages of any character arising as a\n      result of this License or out of the use or inability to use the\n      Work (including but not limited to damages for loss of goodwill,\n      work stoppage, computer failure or malfunction, or any and all\n      other commercial damages or losses), even if such Contributor\n      has been advised of the possibility of such damages.\n\n\n   9. Accepting Warranty or Additional Liability. While redistributing\n      the Work or Derivative Works thereof, You may choose to offer,\n      and charge a fee for, acceptance of support, warranty, indemnity,\n      or other liability obligations and/or rights consistent with this\n      License. However, in accepting such obligations, You may act only\n      on Your own behalf and on Your sole responsibility, not on behalf\n      of any other Contributor, and only if You agree to indemnify,\n      defend, and hold each Contributor harmless for any liability\n      incurred by, or claims asserted against, such Contributor by reason\n      of your accepting any such warranty or additional liability.\n\n\n   END OF TERMS AND CONDITIONS\n",
+            "THIRD_PARTY.md": "# Third-party notices\r\n\r\nThe editor is provided by zorite-editor (MIT), copyright 2026 Will Lehnertz.\r\nThe initial SyntaxStyle palette in src/theme.rs is adapted from its MIT-licensed demo:\r\nhttps://github.com/packetThrower/zorite\r\n\r\nMIT License\r\n\r\nCopyright (c) 2026 Will Lehnertz\r\n\r\nPermission is hereby granted, free of charge, to any person obtaining a copy\r\nof this software and associated documentation files (the \"Software\"), to deal\r\nin the Software without restriction, including without limitation the rights\r\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\r\ncopies of the Software, and to permit persons to whom the Software is\r\nfurnished to do so, subject to the following conditions:\r\n\r\nThe above copyright notice and this permission notice shall be included in all\r\ncopies or substantial portions of the Software.\r\n\r\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\r\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\r\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\r\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\r\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\r\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\r\nSOFTWARE.\r\n\r\nNative filesystem notifications use notify 8.2.2 (CC0-1.0):\r\nhttps://github.com/notify-rs/notify\r\nhttps://creativecommons.org/publicdomain/zero/1.0/legalcode\r\n\nGPUI (gpui-pre 0.3.12), Apache-2.0. The complete Apache license is included\nin LICENSE-APACHE-2.0.txt. Upstream: https://github.com/zed-industries/zed/tree/main/crates/gpui\n",
+            "SHA256SUMS.txt": "752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a  LICENSE-APACHE-2.0.txt\n4572888af7840f2ce0531c96a87880bb876db7cf90cd280cee87db1d4ffe4f28  LICENSE.txt\n701ff45ff415a3b56e02205c2b63f65e209da530e362604136c90ca60f5d127a  README.txt\n513ecfdf3f4ec43d152abb248f7899d6b0905f8f75120928e1ba44f5c4bc6d9e  THIRD_PARTY.md\n5a1bad1fae83d9764bb4858dc4fb1df8b4b705b3cdea68615cfcb6959f3016d2  nxmd.exe\n",
+            "README.txt": "nxmd v0.2.0-alpha - Initial Alpha Release\r\nWindows x64 portable package\r\n\r\nGETTING STARTED\r\n1. Extract all files from the ZIP into a folder.\r\n2. Run nxmd.exe. Use Open vault (Ctrl+O) to select a local notes folder.\r\n3. For initial alpha testing, use a copy of your vault.\r\n\r\nYou can also launch from PowerShell with a vault path:\r\n  .\\nxmd.exe \"C:\\Notes\"\r\n\r\nCtrl+N: new note. Ctrl+S: save. Ctrl+W: close tab.\r\nCtrl+Shift+L: toggle explorer. F5: refresh explorer.\r\nThe previous vault and tab paths restore on the next launch.\r\n\r\nWINDOWS REQUIREMENTS\r\nIntended target: Windows 10/11, x64, with Direct3D 11 support and a compatible\r\ngraphics driver. Automated validation used windows-latest (Windows Server);\r\nthis does not certify every Windows 10/11 installation or graphics driver.\r\nThe executable imports VCRUNTIME140.dll. Install the current Microsoft Visual\r\nC++ x64 Redistributable if this runtime is missing:\r\nhttps://learn.microsoft.com/cpp/windows/latest-supported-vc-redist\r\nNo Rust toolchain, Node.js, Electron, Chromium, or WebView2 is required.\r\nThis unsigned alpha may trigger a Windows SmartScreen reputation warning.\r\n\r\nALPHA LIMITATIONS\r\nUse backups: autosave is debounced, and unsaved edits have no crash recovery.\r\nIME and Windows shell drag-and-drop still need comprehensive manual acceptance.\r\nObsidian image embeds render as standalone blocks; inline wiki embeds and embed\r\nsizing are not supported. Animated images display a first frame. There is no\r\nimage zoom/editing or automatic link rewriting after file moves. Image paste\r\ninserts at the caret rather than replacing selected text. Very large document\r\nrendering, conflict reload/merge, folder management controls, and settings remain\r\nareas for further development. Image resource limits are documented at:\r\nhttps://github.com/nxway/nxmd/blob/v0.2.0-alpha/docs/images.md\r\n\r\nDiagnostics: %LOCALAPPDATA%\\nxmd\\logs\r\nPlease include reproduction steps and relevant local logs when reporting issues:\r\nhttps://github.com/nxway/nxmd/issues\r\nReview logs before sharing, since they can contain local paths.\r\n\r\nBUILD PROVENANCE\r\nRelease tag: v0.2.0-alpha\r\nCommit: c8d3079261169e7bac0956c4b6fd1a5e604a10da\r\nVerified build: https://github.com/nxway/nxmd/actions/runs/43239301300\r\nIndependent native regression: https://github.com/nxway/nxmd/actions/runs/43241151840\r\nThe executable is unchanged from the verified CI artifact; it was not rebuilt.\r\nIts internal diagnostic version string remains 0.1.0.\r\nSHA256SUMS.txt contains SHA-256 hashes for the files in this package.\r\n"
+          }''')
+          package = Path("package"); package.mkdir()
+          shutil.copyfile(src / "nxmd.exe", package / "nxmd.exe")
+          for name, content in payload.items():
+              assert Path(name).name == name
+              (package / name).write_bytes(content.encode("utf-8"))
+          for line in (package / "SHA256SUMS.txt").read_text().splitlines():
+              digest, name = line.split("  ", 1)
+              assert hashlib.sha256((package / name).read_bytes()).hexdigest() == digest, name
+          archive = Path("nxmd-v0.2.0-alpha-windows-x64.zip")
+          with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+              for p in sorted(package.iterdir()):
+                  info = zipfile.ZipInfo(p.name, date_time=(2026, 11, 12, 0, 0, 0))
+                  info.create_system = 0; info.external_attr = 0x20
+                  z.writestr(info, p.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+          with zipfile.ZipFile(archive) as z:
+              assert z.testzip() is None
+              assert hashlib.sha256(z.read("nxmd.exe")).hexdigest() == expected_exe
+          checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+          Path(str(archive) + ".sha256").write_text(f"{checksum}  {archive.name}\n", encoding="ascii")
+          release = json.loads(subprocess.check_output(["gh", "api", "repos/nxway/nxmd/releases/443138227"]))
+          assert release["draft"] and release["prerelease"]
+          assert release["tag_name"] == "v0.2.0-alpha" and release["target_commitish"] == commit
+          assert release["name"] == "nxmd v0.2.0-alpha — Initial Alpha Release"
+          assert not release["assets"], "Unexpected existing assets; refusing to overwrite"
+          print("Verified executable SHA-256:", expected_exe)
+          print("ZIP SHA-256:", checksum)
+      - name: Upload verified assets to the existing draft
+        run: gh release upload v0.2.0-alpha nxmd-v0.2.0-alpha-windows-x64.zip nxmd-v0.2.0-alpha-windows-x64.zip.sha256 --repo nxway/nxmd
+      - name: Publish as a pre-release at the verified source commit
+        run: gh release edit v0.2.0-alpha --repo nxway/nxmd --draft=false --prerelease --latest=false --target c8d3079261169e7bac0956c4b6fd1a5e604a10da
+      - name: Verify published release and tag
+        run: |
+          gh release view v0.2.0-alpha --repo nxway/nxmd --json url,tagName,targetCommitish,isDraft,isPrerelease,assets
+          gh api repos/nxway/nxmd/git/ref/tags/v0.2.0-alpha
