@@ -1807,13 +1807,13 @@ impl Element for EditorElement {
                 bullet_x,
                 ordered,
                 num,
-                level,
+                delimiter,
                 color,
                 ..
             }) = prepaint.marks.get(i).copied().flatten()
             {
                 let glyph: SharedString = if ordered {
-                    zorite_markdown::syntax::ordered_marker(level, num).into()
+                    format!("{num}{delimiter}").into()
                 } else {
                     "•".into()
                 };
@@ -3441,12 +3441,13 @@ fn shape_document(
                 ))
             } else if let Some((plen, indent, ordered, _)) = markdown_syntax::list_prefix(line) {
                 let depth = indent as f32 / tab_indent.max(1) as f32;
-                let (num, level) = ordered_nums[idx];
+                let (num, _) = ordered_nums[idx];
+                let delimiter = line.as_bytes()[plen - 2] as char;
                 let glyph = if ordered {
                     // Word-style depth markers (1. -> a. -> i.), shared with
                     // the reader. The level is structural (from the
                     // renumbering pass), not an indent-width guess.
-                    zorite_markdown::syntax::ordered_marker(level, num)
+                    format!("{num}{delimiter}")
                 } else {
                     "\u{2022}".to_string()
                 };
@@ -3473,7 +3474,7 @@ fn shape_document(
                         text_inset,
                         ordered,
                         num,
-                        level,
+                        delimiter,
                         color: st.quote,
                     },
                 ))

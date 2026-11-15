@@ -277,6 +277,14 @@ fn run_for(
 /// `spans` must be sorted by `range.start` and non-overlapping. Used to reveal
 /// only the construct the caret sits in (#5).
 fn construct_at(spans: &[Span], c: usize) -> Range<usize> {
+    let mut pairs = Vec::new();
+    for (i, opener) in spans.iter().enumerate().filter(|(_, s)| s.style.pair_id != 0) {
+        if let Some(closer) = spans[i + 1..].iter().find(|s| s.style.pair_id == opener.style.pair_id) {
+            let range = opener.range.start..closer.range.end;
+            if range.start <= c && c <= range.end { pairs.push(range); }
+        }
+    }
+    if let Some(range) = pairs.into_iter().max_by_key(|r| r.len()) { return range; }
     let mut i = 0;
     while i < spans.len() {
         let start = spans[i].range.start;
@@ -346,7 +354,7 @@ pub(crate) fn hidden_runs(
         let in_prefix = span.range.end <= reveal_prefix;
         let force = span.range.end <= hide_prefix;
         let hidden = span.style.hide
-            && (span.style.always_hide || force || (!reveal_inline && !in_construct && !in_prefix));
+            && (force || (!reveal_inline && !in_construct && !in_prefix));
         if !hidden {
             segs.push((span.range.clone(), Some(&span.style), None));
         } else if let Some(rep) = span.style.replace.clone() {
@@ -711,6 +719,7 @@ fn scan_inline(
                     Style {
                         color: Some(st.code),
                         bg: Some(st.code_bg),
+                        mono: true,
                         ..Default::default()
                     }
                     .over(base),
@@ -724,6 +733,20 @@ fn scan_inline(
             // start a span the reader wouldn't.
             i += n;
             continue;
+        }
+        // A triple run is one combined construct, not bold plus stray stars.
+        if c == b'*' && !is_backslash_escaped(b, i)
+            && i + 3 < end && &b[i..i+3] == b"***"
+            && let Some(close) = (i+3..end.saturating_sub(2)).find(|&k|
+                &b[k..k+3] == b"***" && !is_backslash_escaped(b,k))
+            && close > i+3
+        {
+            let id = *next_id; *next_id += 1;
+            fmt_marker(out, i..i+3, st.marker, id);
+            scan_styled_body(text, i+3, close, st, out,
+                Style { bold:true, italic:true, ..Default::default() }.over(base), depth, next_id);
+            fmt_marker(out, close..close+3, st.marker, id);
+            i=close+3; continue;
         }
         // Bold: **text** (check before single-* italic). A `\*` (escaped)
         // opener or closer is literal text, matching the reader's CommonMark.
@@ -1488,19 +1511,15 @@ pub(crate) fn list_prefix(line: &str) -> Option<(usize, usize, bool, u32)> {
     None
 }
 
-/// `(position, nesting level)` of every ordered list item, both 0-based-
-/// level / 1-based-position. Word-style, NOT CommonMark: every list counts
-/// from 1 (source digits are display-irrelevant), a nested list is its own
-/// list, and any break — a blank line or prose — ends the open lists, so the
-/// next list starts over. The level is STRUCTURAL (how many lists are open
-/// above), not an indent-width guess, so it survives any spaces-per-level
-/// setting. Non-items are (0, 0).
+/// Computed Markdown ordinal and structural depth. Each list starts at its
+/// first source marker; nested lists have independent counters. Prose or a
+/// marker-type change ends a run, while blank/indented continuation lines do not.
 pub(crate) fn ordered_numbers(lines: &[&str]) -> Vec<(u32, usize)> {
     let mut out = vec![(0u32, 0usize); lines.len()];
     // One entry per open list level: (indent, is_ordered, next number).
     let mut stack: Vec<(usize, bool, u32)> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
-        let Some((_, indent, ordered, _)) = list_prefix(line) else {
+        let Some((_, indent, ordered, source_number)) = list_prefix(line) else {
             // Indented text hangs under the innermost item; anything else —
             // including a blank line — ends the open lists.
             let ws = line
@@ -1509,7 +1528,7 @@ pub(crate) fn ordered_numbers(lines: &[&str]) -> Vec<(u32, usize)> {
                 .count();
             let hanging =
                 !line.trim().is_empty() && stack.last().is_some_and(|&(ind, ..)| ws > ind);
-            if !hanging {
+            if !hanging && !line.trim().is_empty() {
                 stack.clear();
             }
             continue;
@@ -1524,66 +1543,26 @@ pub(crate) fn ordered_numbers(lines: &[&str]) -> Vec<(u32, usize)> {
                     // A different marker type at the same indent starts a
                     // new list.
                     *ord = ordered;
-                    *next = 1;
+                    *next = source_number;
                 }
                 if ordered {
                     out[i] = (*next, depth - 1);
-                    *next += 1;
+                    *next = next.saturating_add(1);
                 }
             }
             _ => {
-                stack.push((indent, ordered, 2));
-                out[i] = (1, depth);
+                stack.push((indent, ordered, source_number.saturating_add(1)));
+                out[i] = (source_number, depth);
             }
         }
     }
     out
 }
 
-/// A copied slice with its ordered markers rewritten to their DISPLAYED
-/// positions — still digit markdown (letters/romans are display-only), so a
-/// nested block pastes starting at 1 and a continuation pastes as `3.`,
-/// exactly the counting the screen showed, in any markdown app. Lines whose
-/// marker sits outside the slice are copied verbatim. Positions come from
-/// the WHOLE document, so a mid-list copy keeps its true numbering.
-pub(crate) fn renumber_copy(content: &str, range: std::ops::Range<usize>) -> String {
-    let lines: Vec<&str> = content.split('\n').collect();
-    let nums = ordered_numbers(&lines);
-    let mut out = String::with_capacity(range.len());
-    let mut line_start = 0;
-    for (i, line) in lines.iter().enumerate() {
-        let line_end = line_start + line.len();
-        // The slice of this line (excluding its newline) inside the range.
-        let seg_start = range.start.max(line_start);
-        let seg_end = range.end.min(line_end);
-        if seg_start <= seg_end && range.start <= line_end && range.end >= line_start {
-            let rel = (seg_start - line_start)..(seg_end - line_start);
-            let marker = list_prefix(line).filter(|&(_, _, ordered, _)| ordered);
-            match marker {
-                // Rewrite only when the whole marker is inside the slice.
-                Some((plen, indent, _, _))
-                    if rel.start == 0 && rel.end >= plen && nums[i].0 > 0 =>
-                {
-                    out.push_str(&line[..indent]);
-                    out.push_str(&nums[i].0.to_string());
-                    // Keep the source's `.`/`)` punctuation and the body.
-                    let digits_end = indent
-                        + line.as_bytes()[indent..]
-                            .iter()
-                            .take_while(|b| b.is_ascii_digit())
-                            .count();
-                    out.push_str(&line[digits_end..rel.end]);
-                }
-                _ => out.push_str(&line[rel]),
-            }
-        }
-        // The newline between this line and the next, when it's in range.
-        if range.start <= line_end && line_end < range.end && i + 1 < lines.len() {
-            out.push('\n');
-        }
-        line_start = line_end + 1;
-    }
-    out
+/// Copy source bytes, including original ordinals, punctuation and line endings.
+/// Projection must never rewrite clipboard content.
+pub(crate) fn copy_source(content: &str, range: std::ops::Range<usize>) -> String {
+    content[range].to_owned()
 }
 
 /// If `line` is a GFM task item — a list item whose body starts with `[ ]`,
@@ -2286,28 +2265,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn copies_renumber_to_displayed_positions() {
-        // Source digits are stale (7., 9.) and the nested list starts at 3 —
-        // the copy carries what the SCREEN showed: 1,2 nested from 1.
-        let doc = "1. a\n7. b\n  3. c\n  9. d\n5. e";
-        assert_eq!(
-            renumber_copy(doc, 0..doc.len()),
-            "1. a\n2. b\n  1. c\n  2. d\n3. e"
-        );
-        // A mid-list copy keeps its true positions (paste renders 2,3).
-        let from = doc.find("7.").unwrap();
-        assert_eq!(
-            renumber_copy(doc, from..doc.len()),
-            "2. b\n  1. c\n  2. d\n3. e"
-        );
-        // A partial first line (marker outside the slice) is verbatim.
-        let from = doc.find("b").unwrap();
-        assert_eq!(
-            renumber_copy(doc, from..doc.find('c').unwrap() + 1),
-            "b\n  1. c"
-        );
-        // Non-list text passes through untouched.
-        assert_eq!(renumber_copy("plain\ntext", 0..10), "plain\ntext");
+    fn sprint2_numbered_lists_keep_source_start_and_nested_start() {
+        assert_eq!(ordered_numbers(&["7. First", "8. Second", "9. Third"]), vec![(7,0),(8,0),(9,0)]);
+        assert_eq!(ordered_numbers(&["7. First", "  4. Nested", "  5. Nested", "8. Second"]), vec![(7,0),(4,1),(5,1),(8,0)]);
+        assert_eq!(ordered_numbers(&["7. First", "", "8. Second", "paragraph", "20. Separate"]), vec![(7,0),(0,0),(8,0),(0,0),(20,0)]);
+    }
+
+    #[test]
+    fn sprint2_copy_preserves_markers_bom_and_crlf() {
+        let doc = "\u{feff}---\r\nkey: value\r\n---\r\n7. First\r\n9. Original\r\n  03) Nested\r\n![[image.png]]\r\n";
+        assert_eq!(copy_source(doc, 0..doc.len()), doc);
+    }
+
+    #[test]
+    fn sprint2_combined_adjacent_inline_and_literal_code() {
+        let st = test_style();
+        let font = gpui::font("Helvetica");
+        for (source, expected) in [
+            ("***bold and italic***", "bold and italic"),
+            ("**bold**normal", "boldnormal"),
+            ("*italic*normal", "italicnormal"),
+            ("~~strikethrough~~", "strikethrough"),
+            ("**bold with *nested italic* inside**", "bold with nested italic inside"),
+            (r"\*literal asterisks\*", "*literal asterisks*"),
+            ("`**literal** | \u{1f642}`", "**literal** | \u{1f642}"),
+        ] {
+            let (display,runs,map)=hidden_runs(source,&font,Hsla::default(),&[],None,0,0,false,&st);
+            assert_eq!(display,expected,"{source}");
+            assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(),display.len());
+            assert_eq!(map.len(),display.len()+1);
+            assert!(map.windows(2).all(|w| w[0]<=w[1]));
+            for (d,_) in display.char_indices() { assert!(source.is_char_boundary(map[d])); }
+        }
+        assert_eq!(emphasis_spans("***both***"), vec![("both".into(),true,true)]);
+    }
+
+    #[test]
+    fn sprint2_caret_reveals_only_relevant_formatting() {
+        let st=test_style(); let font=gpui::font("Helvetica");
+        let source="**bold**normal *italic*";
+        let (display,_,_)=hidden_runs(source,&font,Hsla::default(),&[],Some(3),0,0,false,&st);
+        assert_eq!(display,"**bold**normal italic");
+        let (display,_,_)=hidden_runs(source,&font,Hsla::default(),&[],None,0,0,false,&st);
+        assert_eq!(display,"boldnormal italic");
+    }
+
+    #[test]
+    fn copies_preserve_source_positions() {
+        let doc="1. a\n7. b\n  3. c\n  9. d\n5. e";
+        for range in [0..doc.len(), doc.find("7.").unwrap()..doc.len(), doc.find('b').unwrap()..doc.find('c').unwrap()+1] {
+            assert_eq!(copy_source(doc,range.clone()),doc[range]);
+        }
     }
 
     #[test]
@@ -2318,7 +2326,7 @@ mod tests {
         // (always_hide wins over the selection reveal; structural markers
         // like links still come back).
         let (disp, _, _) = hidden_runs("- a **b** c", &font, c, &[], None, 0, 2, true, &st);
-        assert_eq!(disp, "a b c");
+        assert_eq!(disp, "a **b** c");
         let (disp, _, _) = hidden_runs("- [t](u) c", &font, c, &[], None, 0, 2, true, &st);
         assert_eq!(disp, "[t](u) c");
         // Same line unselected: everything hidden.
@@ -2980,7 +2988,7 @@ mod tests {
         // Formatting markers never reveal — not even under the caret
         // (Cditor-style; see `formatting_markers_never_reveal`).
         let (disp, _, _) = hidden_runs(line, &font, c, &[], Some(4), 0, 0, false, &st);
-        assert_eq!(disp, "bold it");
+        assert_eq!(disp, "**bold** it");
         // Caret in plain text reveals nothing either.
         let (disp, _, _) = hidden_runs("a **b**", &font, c, &[], Some(0), 0, 0, false, &st);
         assert_eq!(disp, "a b");
@@ -3145,55 +3153,39 @@ mod tests {
     }
 
     #[test]
-    fn formatting_markers_never_reveal() {
-        // Cditor-style: even with the caret INSIDE the construct, formatting
-        // markers stay hidden (the styling is the feedback; toggles edit it).
-        let font = gpui::font("Helvetica");
-        let c = hsla(0., 0., 0., 1.);
-        let st = test_style();
-        for (line, disp) in [
-            ("**bold** x", "bold x"),
-            ("*it* x", "it x"),
-            ("~~s~~ x", "s x"),
-            ("`c` x", "c x"),
-            ("<u>u</u> x", "u x"),
-            ("<mark>m</mark> x", "m x"),
-        ] {
-            let caret_inside = Some(3.min(line.len() - 1));
-            let (d, _, _) = hidden_runs(line, &font, c, &[], caret_inside, 0, 0, false, &st);
-            assert_eq!(d, disp, "{line:?}");
+    fn formatting_markers_reveal_on_caret() {
+        let font=gpui::font("Helvetica"); let st=test_style();
+        for line in ["**bold** x", "*it* x", "~~s~~ x", "`c` x", "<u>u</u> x", "<mark>m</mark> x"] {
+            let (d,_,_)=hidden_runs(line,&font,Hsla::default(),&[],Some(2),0,0,false,&st);
+            assert_eq!(d,line);
         }
-        // Structural constructs keep the caret reveal: a wiki link's brackets
-        // show while the caret is inside it.
-        let (d, _, _) = hidden_runs("[[Page]] x", &font, c, &[], Some(4), 0, 0, false, &st);
-        assert_eq!(d, "[[Page]] x");
     }
 
     #[test]
-    fn ordered_numbers_word_style() {
+    fn ordered_numbers_markdown_starts() {
         // A nested list counts on its own from 1 (whatever the digits say)
         // one level deeper, and the outer list resumes after it. The level
         // is structural — ANY deeper indent nests, whatever the tab setting.
         assert_eq!(
             ordered_numbers(&["1. a", "2. b", "  3. c", "  9. d", "6. e"]),
-            vec![(1, 0), (2, 0), (1, 1), (2, 1), (3, 0)]
+            vec![(1, 0), (2, 0), (3, 1), (4, 1), (3, 0)]
         );
         // Source digits are display-irrelevant; every list starts at 1.
-        assert_eq!(ordered_numbers(&["5. a", "9. b"]), vec![(1, 0), (2, 0)]);
+        assert_eq!(ordered_numbers(&["5. a", "9. b"]), vec![(5, 0), (6, 0)]);
         // A bullet at the same indent ends the ordered run (bullets still
         // occupy a level for anything nested under them).
         assert_eq!(
             ordered_numbers(&["1. a", "- b", "7. c"]),
-            vec![(1, 0), (0, 0), (1, 0)]
+            vec![(1, 0), (0, 0), (7, 0)]
         );
         // Any break — blank line or prose — starts numbering over.
         assert_eq!(
             ordered_numbers(&["1. a", "", "2. b"]),
-            vec![(1, 0), (0, 0), (1, 0)]
+            vec![(1, 0), (0, 0), (2, 0)]
         );
         assert_eq!(
             ordered_numbers(&["1. a", "prose", "7. b"]),
-            vec![(1, 0), (0, 0), (1, 0)]
+            vec![(1, 0), (0, 0), (7, 0)]
         );
         // A hanging indent (wrapped text under an item) keeps the list open.
         assert_eq!(

@@ -2902,7 +2902,7 @@ impl EditorState {
             // Ordered markers copy at their DISPLAYED positions (still digit
             // markdown), so a paste counts the way the screen did.
             let text = if self.markdown_style.is_some() {
-                markdown_syntax::renumber_copy(&self.content, range)
+                markdown_syntax::copy_source(&self.content, range)
             } else {
                 self.content[range].to_string()
             };
@@ -2917,7 +2917,7 @@ impl EditorState {
         if !self.selected_range.is_empty() {
             let range = self.copy_range();
             let text = if self.markdown_style.is_some() {
-                markdown_syntax::renumber_copy(&self.content, range)
+                markdown_syntax::copy_source(&self.content, range)
             } else {
                 self.content[range].to_string()
             };
@@ -5095,7 +5095,9 @@ impl EditorState {
             return None;
         }
         let pairs = markdown_syntax::fmt_marker_pairs(line, st);
-        if pairs.is_empty() {
+        // The active construct is revealed in nxmd: delete the actual source
+        // grapheme, not a hidden-marker shortcut intended for rich-text mode.
+        if pairs.is_empty() || pairs.iter().any(|(o,c)| o.start <= col && col <= c.end) {
             return None;
         }
         let markers: Vec<&Range<usize>> = pairs.iter().flat_map(|(o, c)| [o, c]).collect();
@@ -6510,7 +6512,7 @@ enum LineMark {
         num: u32,
         /// Structural nesting level (0 = top), for the Word-style marker
         /// scheme (`1.` -> `a.` -> `i.`).
-        level: usize,
+        delimiter: char,
         color: Hsla,
     },
     /// GFM task item: a painted ☐/☑ box at `bullet_x`, muted; the body sits at

@@ -33,6 +33,8 @@ jobs:
         run: cargo build --locked --release
       - name: Test bounded native image cache
         run: cargo test --locked --release --bin nxmd
+      - name: Test Markdown projection and source mapping
+        run: cargo test --locked --release --test editor_projection
       - name: Inspect native dependencies and package executable
         shell: pwsh
         run: ./scripts/windows-package.ps1

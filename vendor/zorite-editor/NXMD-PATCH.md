@@ -15,3 +15,13 @@ Sprint 1 image integration (nxmd):
 - Parser regression tests include the exact pure source module in
   `tests/images.rs`; native GUI checks cover raster painting and source undo.
 - Inline (mixed-prose) wiki embeds and `|width` sizing are not implemented.
+
+Sprint 2 (in progress):
+- Ordered list projection starts at the first source ordinal at each nesting
+  level; nesting keeps decimal markers and the original period/parenthesis.
+  Clipboard copy preserves source ordinals rather than renumbering them.
+- Formatting markers reveal on the active construct or selection. Active
+  formatting uses source-grapheme deletion instead of rich-text marker deletion.
+- Triple asterisks project combined bold/italic; inline code uses the mono font.
+- The root editor_projection test target compiles the exact vendored scanner
+  and its regression suite, without enabling GPUI's separate test platform.
