@@ -247,6 +247,7 @@ try {
     [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
     Wait-SavedText $longNote $mixed 'Long Markdown undo did not preserve source'
     . "$PSScriptRoot/windows-images-smoke.ps1"
+    . "$PSScriptRoot/windows-editor-smoke.ps1"
     # Save a screenshot of the actual native UI for visual review.
     $bounds=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
     $bitmap=[System.Drawing.Bitmap]::new($bounds.Width,$bounds.Height)

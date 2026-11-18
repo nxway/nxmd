@@ -49,6 +49,7 @@ mod markdown_syntax;
 mod image_embed;
 pub use markdown_syntax::{AlertIcons, MathAlign, PropertyIconFn, SyntaxStyle};
 
+mod table_layout;
 mod tables;
 use tables::*;
 
@@ -2084,11 +2085,11 @@ impl EditorState {
         self.move_to(off, cx);
     }
 
-    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+    fn up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
         // In a table, step cell-to-cell keeping the column; at the table's edge
         // `table_move_vertical` returns `None` and a normal move exits the table.
         if self.caret_in_table()
-            && let Some(off) = self.table_move_vertical(-1)
+            && let Some(off) = self.table_move_visual(-1, window)
         {
             self.move_to(off, cx);
             return;
@@ -2130,9 +2131,9 @@ impl EditorState {
         cx.notify();
     }
 
-    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+    fn down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
         if self.caret_in_table()
-            && let Some(off) = self.table_move_vertical(1)
+            && let Some(off) = self.table_move_visual(1, window)
         {
             self.move_to(off, cx);
             return;
@@ -2184,13 +2185,17 @@ impl EditorState {
         self.select_to(off, cx);
     }
 
-    fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
-        let off = self.move_vertical(-1);
+    fn select_up(&mut self, _: &SelectUp, window: &mut Window, cx: &mut Context<Self>) {
+        let off = self
+            .table_move_visual(-1, window)
+            .unwrap_or_else(|| self.move_vertical(-1));
         self.select_to(off, cx);
     }
 
-    fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
-        let off = self.move_vertical(1);
+    fn select_down(&mut self, _: &SelectDown, window: &mut Window, cx: &mut Context<Self>) {
+        let off = self
+            .table_move_visual(1, window)
+            .unwrap_or_else(|| self.move_vertical(1));
         self.select_to(off, cx);
     }
 
@@ -2912,7 +2917,7 @@ impl EditorState {
 
     /// Copy the selection as the raw markdown ONLY — no host clipboard
     /// flavors — for pasting literal source into rich surfaces (the context
-    /// menu's "Copy as Markdown"). Same selection/renumber rules as `copy`.
+    /// menu's "Copy as Markdown"). Same exact-source selection rules as `copy`.
     pub fn copy_plain(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
             let range = self.copy_range();
@@ -5033,11 +5038,26 @@ impl EditorState {
         self.offset_from_utf16(range.start)..self.offset_from_utf16(range.end)
     }
 
+    /// Input can arrive before the next paint. Determine syntax reveal from
+    /// current source/caret, never from the previous frame's hidden-byte map.
+    fn caret_reveals_format(&self, offset: usize) -> bool {
+        let Some(style) = self.markdown_style.as_ref() else {
+            return false;
+        };
+        let (row, col) = self.row_col(offset);
+        let start = self.line_starts()[row];
+        markdown_syntax::fmt_marker_pairs(&self.content[start..self.line_end(row)], style)
+            .iter()
+            .any(|(open, close)| open.start <= col && col <= close.end)
+    }
+
     /// One VISIBLE position left of `offset`: a grapheme step, extended while
-    /// the display column doesn't change — always-hidden formatting markers
-    /// (`**`, `~~`, …) are zero-width on screen, so crossing one must not cost
-    /// extra keypresses. Rows without a display map (raw/code) step plainly.
+    /// the display column does not change. Active formatting uses current source
+    /// boundaries, including when input arrives before the next paint.
     fn prev_visible_boundary(&self, offset: usize) -> usize {
+        if self.caret_reveals_format(offset) {
+            return self.previous_boundary(offset);
+        }
         let (row0, col0) = self.row_col(offset);
         let d0 = self.display_col(row0, col0);
         let mut off = self.previous_boundary(offset);
@@ -5058,6 +5078,9 @@ impl EditorState {
 
     /// One VISIBLE position right of `offset` — see [`Self::prev_visible_boundary`].
     fn next_visible_boundary(&self, offset: usize) -> usize {
+        if self.caret_reveals_format(offset) {
+            return self.next_boundary(offset);
+        }
         let (row0, col0) = self.row_col(offset);
         let d0 = self.display_col(row0, col0);
         let mut off = self.next_boundary(offset);
@@ -5097,7 +5120,7 @@ impl EditorState {
         let pairs = markdown_syntax::fmt_marker_pairs(line, st);
         // The active construct is revealed in nxmd: delete the actual source
         // grapheme, not a hidden-marker shortcut intended for rich-text mode.
-        if pairs.is_empty() || pairs.iter().any(|(o,c)| o.start <= col && col <= c.end) {
+        if pairs.is_empty() || pairs.iter().any(|(o, c)| o.start <= col && col <= c.end) {
             return None;
         }
         let markers: Vec<&Range<usize>> = pairs.iter().flat_map(|(o, c)| [o, c]).collect();
@@ -6448,8 +6471,17 @@ struct CodeBg {
 /// last-row flags, and the border color. Built only when the caret is outside
 /// the table — the caret's table shows source instead ("raw on caret").
 #[derive(Clone)]
+struct ProjectedCell {
+    text: SharedString,
+    runs: std::rc::Rc<Vec<TextRun>>,
+    map: std::rc::Rc<Vec<usize>>,
+}
+
+#[derive(Clone)]
 struct TableRow {
     cells: Vec<SharedString>,
+    projected: std::rc::Rc<Vec<ProjectedCell>>,
+    projection_key: u64,
     /// Byte range of each cell's trimmed content within its source line — for
     /// placing the caret inside a cell + hit-testing a click back to a source
     /// offset (in-cell editing).
@@ -6510,8 +6542,7 @@ enum LineMark {
         text_inset: Pixels,
         ordered: bool,
         num: u32,
-        /// Structural nesting level (0 = top), for the Word-style marker
-        /// scheme (`1.` -> `a.` -> `i.`).
+        /// Source marker delimiter.
         delimiter: char,
         color: Hsla,
     },
@@ -6910,6 +6941,9 @@ struct ShapeCaches {
     line_runs: std::cell::RefCell<std::collections::HashMap<u64, CachedLineRuns>>,
     region_cols: std::cell::RefCell<RegionCols>,
     cell_rows: std::cell::RefCell<std::collections::HashMap<u64, usize>>,
+    table_cells: std::cell::RefCell<
+        std::collections::HashMap<u64, (String, std::rc::Rc<Vec<ProjectedCell>>)>,
+    >,
     /// Per-line (row height, wrap rows), keyed by the line-run key ⊕ font
     /// size ⊕ wrap width — the shaping window's exact heights for skipped
     /// offscreen lines.
@@ -7325,7 +7359,7 @@ mod tests {
     fn a_wide_table_scrolls_to_its_own_far_edge_either_way() {
         let g = TABLE_GUTTER;
         let total = px(900.);
-        let avail = px(W - g); // what `table_sx` clamps against
+        let avail = px(W - 2. * g); // what `table_sx` clamps against
         let max = total - avail;
         // Unscrolled, each direction shows its own leading edge at the gutter.
         assert_eq!(table_left_x(px(O), px(W), total, px(0.), false), px(O + g));
@@ -7337,9 +7371,9 @@ mod tests {
         // LTR's right edge reaches the column's right, RTL's left edge the left.
         assert_eq!(
             table_left_x(px(O), px(W), total, max, false) + total,
-            px(O + W)
+            px(O + W - g)
         );
-        assert_eq!(table_left_x(px(O), px(W), total, max, true), px(O));
+        assert_eq!(table_left_x(px(O), px(W), total, max, true), px(O + g));
         // Scroll moves the content in OPPOSITE directions — why the wheel and
         // the thumb's `factor` invert their sign on an RTL table.
         let step = px(50.);
@@ -7383,16 +7417,16 @@ mod tests {
         let g = TABLE_GUTTER;
         assert_eq!(
             table_visible_band(px(O), px(W), false),
-            (px(O + g), px(O + W))
+            (px(O + g), px(O + W - g))
         );
         assert_eq!(
             table_visible_band(px(O), px(W), true),
-            (px(O), px(O + W - g))
+            (px(O + g), px(O + W - g))
         );
         // Both bands are the `avail` width the scroll clamp assumes.
         for rtl in [false, true] {
             let (l, r) = table_visible_band(px(O), px(W), rtl);
-            assert_eq!(r - l, px(W - g));
+            assert_eq!(r - l, px(W - 2. * g));
         }
     }
 }

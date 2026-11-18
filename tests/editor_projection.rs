@@ -6,3 +6,6 @@ pub use zorite_editor::Diagnostic;
 mod image_embed;
 #[path = "../vendor/zorite-editor/src/markdown_syntax.rs"]
 mod markdown_syntax;
+
+#[path = "../vendor/zorite-editor/src/table_layout.rs"]
+mod table_layout;

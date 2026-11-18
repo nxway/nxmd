@@ -183,3 +183,24 @@ fn explorer_folders_first_and_natural_names() -> anyhow::Result<()> {
     assert_eq!(entries[4].path, Path::new("10.md"));
     Ok(())
 }
+
+#[test]
+fn sprint2_save_reopen_preserves_source_and_unrelated_bytes() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let vault = Vault::open(dir.path())?;
+    for (index, (bom, newline)) in [("", "\n"), ("\u{feff}", "\r\n")].iter().enumerate() {
+        let source = format!("{bom}---\ntitle: 'Keep  spaces'\nunknown: [a, b]\n---\n\n07) First  \n9) Original ordinal\n   4. Nested\n\n| **Name** | *Value* |\n| :--- | ---: |\n| escaped \\| pipe | `literal **` |\n\n***both*** and \\*literal\\*\n![[image.png|80]]\n[^unsupported]: untouched\n\nEdit only here.\n").replace('\n', newline);
+        let path = format!("preserved-{index}.md");
+        fs::write(dir.path().join(&path), source.as_bytes())?;
+        let mut doc = vault.load(Path::new(&path))?;
+        vault.save(&mut doc)?;
+        assert_eq!(fs::read(dir.path().join(&path))?, source.as_bytes());
+        let offset = doc.text.find("only").unwrap();
+        doc.text.replace_range(offset..offset + 4, "exactly");
+        vault.save(&mut doc)?;
+        let expected = source.replacen("only", "exactly", 1);
+        assert_eq!(fs::read(dir.path().join(&path))?, expected.as_bytes());
+        assert_eq!(vault.load(Path::new(&path))?.text, expected);
+    }
+    Ok(())
+}

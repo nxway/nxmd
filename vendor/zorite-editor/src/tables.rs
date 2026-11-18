@@ -39,7 +39,7 @@ impl EditorState {
         let sx = self.table_sx(
             table_header_row(t, row),
             total,
-            bounds.size.width - px(TABLE_GUTTER),
+            bounds.size.width - px(TABLE_GUTTER * 2.),
         );
         table_left_x(bounds.origin.x, bounds.size.width, total, sx, t.rtl)
     }
@@ -103,7 +103,7 @@ impl EditorState {
             return;
         }
         let total: Pixels = t.col_widths.iter().copied().sum();
-        let avail = bounds.size.width - px(TABLE_GUTTER);
+        let avail = bounds.size.width - px(TABLE_GUTTER * 2.);
         if total <= avail {
             if dbg {
                 eprintln!("wheel: fits total={total:?} avail={avail:?}");
@@ -221,10 +221,6 @@ impl EditorState {
         let rel = point(position.x - self.table_left(t, row, bounds), rel.y);
         // Measure at the last paint's font + size — the style stack is unwound
         // during event dispatch, so `text_style()` here reports the root style.
-        let font = self
-            .paint_font
-            .clone()
-            .unwrap_or_else(|| window.text_style().font());
         let font_size = self.font_size;
         let pad = px(TABLE_CELL_PAD);
         // Column the click is in, and its left x — through the same mirrored
@@ -245,24 +241,18 @@ impl EditorState {
         // A click in a spanned trailing column lands in the short row's last cell.
         let cell = cell.min(t.cells.len().saturating_sub(1));
         let cx = col_offset(&t.col_widths, t.cells.len(), cell, t.rtl);
-        let content = t.cells.get(cell)?;
+        let content = t.projected.get(cell)?;
         let cw = cell_span_width(&t.col_widths, t.cells.len(), cell);
-        let cf = cell_font(&font, t.is_header);
-        let full_w = measure_width(window, content, &cf, font_size);
-        let avail = (cw - pad * 2.).max(px(8.));
-        // Alignment shifts only unwrapped content (a wrapped cell fills its width).
-        let align_off = if full_w > avail {
-            px(0.)
-        } else {
-            match t.aligns.get(cell) {
-                Some(markdown_syntax::Align::Center) => (avail - full_w).max(px(0.)) / 2.,
-                Some(markdown_syntax::Align::Right) => (avail - full_w).max(px(0.)),
-                // Unaligned cells follow the table's direction — same rule the
-                // paint uses, so the hit-test matches what's on screen.
-                _ if t.rtl => (avail - full_w).max(px(0.)),
-                _ => px(0.),
-            }
-        };
+        let avail = (cw - pad * 2.).max(px(1.));
+        let shaped = shape_cell(window, content, font_size, Some(avail))?;
+        let row_y = (rel.y - self.line_tops[row] - px(6.)).max(px(0.));
+        let align_off = cell_alignment_offset(
+            &shaped,
+            row_y,
+            font_size * LINE_HEIGHT_RATIO,
+            avail,
+            cell_alignment(t, cell),
+        );
         // In-cell y: from the row's top, minus the cell's constant 6px top pad
         // (`table_row_h` = line height + 12, text centered → 6 above).
         let pad_y = px(6.);
@@ -270,7 +260,7 @@ impl EditorState {
             (rel.x - cx - pad - align_off).max(px(0.)),
             rel.y - self.line_tops[row] - pad_y,
         );
-        let in_cell = cell_offset_for_point(content, target, avail, &cf, font_size, window);
+        let in_cell = cell_offset_for_point(content, target, avail, font_size, window);
         Some(self.line_starts()[row] + t.cell_ranges.get(cell)?.start + in_cell)
     }
 
@@ -282,6 +272,45 @@ impl EditorState {
             .get(row)
             .and_then(Option::as_ref)
             .is_some_and(|t| !t.is_separator)
+    }
+
+    /// Move within a wrapped cell before crossing to the adjacent table row.
+    /// Use the same projected runs and alignment as paint and pointer hits.
+    pub(crate) fn table_move_visual(&self, dir: i32, window: &mut Window) -> Option<usize> {
+        let (row, col) = self.row_col(self.cursor_offset());
+        let table = self.table_rows.get(row).and_then(Option::as_ref)?;
+        if table.is_separator {
+            return None;
+        }
+        let font = self
+            .paint_font
+            .clone()
+            .unwrap_or_else(|| window.text_style().font());
+        let (x, y, cell, _) = table_caret_pos(table, col, px(0.), &font, self.font_size, window)?;
+        let projected = table.projected.get(cell)?;
+        let width = (cell_span_width(&table.col_widths, table.cells.len(), cell)
+            - px(TABLE_CELL_PAD * 2.))
+        .max(px(8.));
+        let line = shape_cell(window, projected, self.font_size, Some(width))?;
+        let line_h = self.font_size * LINE_HEIGHT_RATIO;
+        let target_y = y + line_h * dir as f32;
+        if target_y >= px(0.) && target_y < line.size(line_h).height {
+            let align =
+                cell_alignment_offset(&line, target_y, line_h, width, cell_alignment(table, cell));
+            let cell_x = col_offset(&table.col_widths, table.cells.len(), cell, table.rtl);
+            let source = cell_offset_for_point(
+                projected,
+                point(
+                    x - cell_x - px(TABLE_CELL_PAD) - align,
+                    target_y + line_h / 2.,
+                ),
+                width,
+                self.font_size,
+                window,
+            );
+            return Some(self.line_starts()[row] + table.cell_ranges[cell].start + source);
+        }
+        self.table_move_vertical(dir)
     }
 
     /// Cell-aware vertical caret move inside a table: keep the same column (cell +
@@ -307,7 +336,11 @@ impl EditorState {
                 Some(Some(nt)) if !nt.is_separator && !nt.cell_ranges.is_empty() => {
                     let tc = cell.min(nt.cell_ranges.len() - 1);
                     let cr = &nt.cell_ranges[tc];
-                    return Some(starts[ru] + cr.start + intra.min(cr.end - cr.start));
+                    let mut target = starts[ru] + cr.start + intra.min(cr.len());
+                    while !self.content.is_char_boundary(target) {
+                        target -= 1;
+                    }
+                    return Some(target);
                 }
                 Some(Some(_)) => r += dir as isize, // separator — skip past it
                 // A non-table row next to the table: exit onto it at the same byte
@@ -799,6 +832,8 @@ impl EditorState {
             self.font_size,
             Hsla::default(),
             None,
+            None,
+            self.markdown_style.as_ref(),
         );
         let Some(&w) = natural.get(col) else {
             return;
@@ -967,9 +1002,58 @@ impl EditorState {
     }
 }
 
-/// Content-fit column widths for a table region (W4c): each column sized to its
-/// widest cell (header measured bold) + padding, with a minimum. A table wider
-/// than the viewport is NOT scaled down — it scrolls horizontally in place.
+/// Project one cell once, then use these exact runs/maps for measurement,
+/// paint, caret placement and pointer hit-testing.
+pub(crate) fn project_cell(
+    source: &str,
+    font: &Font,
+    color: Hsla,
+    style: Option<&SyntaxStyle>,
+    caret: Option<usize>,
+    selected: bool,
+) -> ProjectedCell {
+    let (text, runs, map) = if let Some(style) = style {
+        markdown_syntax::cell_runs(source, font, color, caret, selected, style)
+    } else {
+        (
+            source.to_owned(),
+            vec![TextRun {
+                len: source.len(),
+                font: font.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            (0..=source.len()).collect(),
+        )
+    };
+    ProjectedCell {
+        text: text.into(),
+        runs: std::rc::Rc::new(runs),
+        map: std::rc::Rc::new(map),
+    }
+}
+
+fn cell_run_slice(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
+    let mut offset = 0;
+    runs.iter()
+        .filter_map(|run| {
+            let start = offset.max(range.start);
+            offset += run.len;
+            let end = offset.min(range.end);
+            (end > start).then(|| {
+                let mut r = run.clone();
+                r.len = end - start;
+                r
+            })
+        })
+        .collect()
+}
+
+/// Intrinsic preferred width and longest-word width, both measured using the
+/// actual projected style runs. Shrink flexible columns to the viewport only
+/// while words still fit; otherwise retain a horizontally scrollable grid.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn table_column_widths(
     lines: &[&str],
@@ -979,10 +1063,9 @@ pub(crate) fn table_column_widths(
     font_size: Pixels,
     color: Hsla,
     col_resize: Option<TableColResize>,
+    available: Option<Pixels>,
+    style: Option<&SyntaxStyle>,
 ) -> Vec<Pixels> {
-    // Reader parity: a row with MORE cells than the header widens the grid —
-    // extra columns render (the short rows' last cells span the remainder)
-    // instead of hiding the excess.
     let cols = region
         .lines
         .clone()
@@ -992,65 +1075,55 @@ pub(crate) fn table_column_widths(
         .unwrap_or(0)
         .max(region.aligns.len())
         .max(1);
-    let pad = px(TABLE_CELL_PAD);
-    let mut widths = vec![px(0.); cols];
-    for li in region.lines.clone() {
-        if li == region.lines.start + 1 {
-            continue; // skip the |---| separator
-        }
-        let header = li == region.lines.start;
-        for (c, cell) in markdown_syntax::table_cells(lines[li])
-            .iter()
+    let padding = TABLE_CELL_PAD * 2.;
+    let em = f32::from(measure_width(window, "m", base_font, font_size)).ceil();
+    let mut minimum = vec![em + padding; cols];
+    let mut preferred = minimum.clone();
+    for li in region
+        .lines
+        .clone()
+        .filter(|&li| li != region.lines.start + 1)
+    {
+        let font = cell_font(base_font, li == region.lines.start);
+        for (c, source) in markdown_syntax::table_cells(lines[li])
+            .into_iter()
             .enumerate()
             .take(cols)
         {
-            if cell.is_empty() {
-                continue;
+            let cell = project_cell(source, &font, color, style, None, false);
+            let shaped =
+                window
+                    .text_system()
+                    .shape_line(cell.text.clone(), font_size, &cell.runs, None);
+            preferred[c] = preferred[c].max(f32::from(shaped.width()).ceil() + padding);
+            for (offset, word) in cell
+                .text
+                .split_word_bound_indices()
+                .filter(|(_, w)| !w.trim().is_empty())
+            {
+                let runs = cell_run_slice(&cell.runs, offset..offset + word.len());
+                let width = window
+                    .text_system()
+                    .shape_line(word.to_owned().into(), font_size, &runs, None)
+                    .width();
+                minimum[c] = minimum[c].max(f32::from(width).ceil() + padding);
             }
-            let mut font = base_font.clone();
-            if header {
-                font.weight = gpui::FontWeight::BOLD;
-            }
-            let run = TextRun {
-                len: cell.len(),
-                font,
-                color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let w = window
-                .text_system()
-                .shape_line(
-                    SharedString::from(cell.to_string()),
-                    font_size,
-                    &[run],
-                    None,
-                )
-                .width();
-            widths[c] = widths[c].max(w + pad * 2.);
         }
     }
-    for w in &mut widths {
-        *w = (*w).max(px(48.));
-    }
-    // Explicit widths — the marker's `cols=` list (drag-to-resize persisted),
-    // then the live drag — override the measurement (floored so a column can't
-    // vanish). Content-measured columns keep the 48px floor above.
-    if let Some(attr) = &region.col_widths_attr {
-        for (c, w) in attr.iter().enumerate().take(cols) {
-            widths[c] = px(w.max(24.));
+    if let Some(widths) = &region.col_widths_attr {
+        for (c, &width) in widths.iter().enumerate().take(cols) {
+            preferred[c] = width.max(minimum[c]);
+            minimum[c] = preferred[c];
         }
     }
-    if let Some(r) = col_resize.filter(|r| r.header_row == region.lines.start)
-        && r.col < cols
-    {
-        widths[r.col] = px(r.width.max(24.));
+    if let Some(r) = col_resize.filter(|r| r.header_row == region.lines.start && r.col < cols) {
+        preferred[r.col] = r.width.max(minimum[r.col]);
+        minimum[r.col] = preferred[r.col];
     }
-    // No scale-to-fit: a table wider than the viewport keeps its natural
-    // columns and scrolls horizontally in place (Cditor-style) — see
-    // `EditorState::table_scroll_x`.
-    widths
+    crate::table_layout::column_widths(&minimum, &preferred, available.map(f32::from))
+        .into_iter()
+        .map(px)
+        .collect()
 }
 
 /// Horizontal inset (px) of a table cell's text from its column's left edge.
@@ -1073,34 +1146,13 @@ fn cell_font(font: &Font, is_header: bool) -> Font {
 /// renders (measuring prefixes in isolation drifts by their kerning).
 fn shape_cell(
     window: &mut Window,
-    content: &str,
-    font: &Font,
+    cell: &ProjectedCell,
     font_size: Pixels,
     wrap: Option<Pixels>,
-    color: Hsla,
 ) -> Option<WrappedLine> {
-    let run = TextRun {
-        len: content.len(),
-        font: font.clone(),
-        color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let runs: &[TextRun] = if content.is_empty() {
-        &[]
-    } else {
-        std::slice::from_ref(&run)
-    };
     window
         .text_system()
-        .shape_text(
-            SharedString::from(content.to_string()),
-            font_size,
-            runs,
-            wrap,
-            None,
-        )
+        .shape_text(cell.text.clone(), font_size, &cell.runs, wrap, None)
         .ok()?
         .into_iter()
         .next()
@@ -1150,12 +1202,11 @@ pub(crate) fn table_left_x(
 /// The x band a table is visible in: the note column less its gutter, on the
 /// side [`table_left_x`] put the gutter. Clamps the scroll thumb's track and a
 /// wide table's selection highlight.
-pub(crate) fn table_visible_band(origin: Pixels, width: Pixels, rtl: bool) -> (Pixels, Pixels) {
-    if rtl {
-        (origin, origin + width - px(TABLE_GUTTER))
-    } else {
-        (origin + px(TABLE_GUTTER), origin + width)
-    }
+pub(crate) fn table_visible_band(origin: Pixels, width: Pixels, _rtl: bool) -> (Pixels, Pixels) {
+    (
+        origin + px(TABLE_GUTTER),
+        origin + (width - px(TABLE_GUTTER)).max(px(TABLE_GUTTER)),
+    )
 }
 
 /// The header row of the table that `t` (the grid row at line `row`) belongs
@@ -1196,17 +1247,14 @@ pub(crate) fn cell_span_width(col_widths: &[Pixels], cells_len: usize, c: usize)
 
 pub(crate) fn table_row_wrap_rows(
     window: &mut Window,
-    cells: &[SharedString],
+    cells: &[ProjectedCell],
     col_widths: &[Pixels],
-    is_header: bool,
-    font: &Font,
     font_size: Pixels,
 ) -> usize {
     let pad = px(TABLE_CELL_PAD);
-    let cf = cell_font(font, is_header);
     let mut rows = 1;
     for (c, cell) in cells.iter().enumerate() {
-        if cell.is_empty() {
+        if cell.text.is_empty() {
             continue;
         }
         let cw = cell_span_width(col_widths, cells.len(), c);
@@ -1214,7 +1262,7 @@ pub(crate) fn table_row_wrap_rows(
             continue;
         }
         let avail = (cw - pad * 2.).max(px(8.));
-        if let Some(wl) = shape_cell(window, cell, &cf, font_size, Some(avail), Hsla::default()) {
+        if let Some(wl) = shape_cell(window, cell, font_size, Some(avail)) {
             rows = rows.max(wl.wrap_boundaries().len() + 1);
         }
     }
@@ -1237,7 +1285,7 @@ pub(crate) fn table_caret_pos(
     t: &TableRow,
     col: usize,
     left: Pixels,
-    font: &Font,
+    _font: &Font,
     font_size: Pixels,
     window: &mut Window,
 ) -> Option<(Pixels, Pixels, usize, usize)> {
@@ -1247,85 +1295,106 @@ pub(crate) fn table_caret_pos(
     let pad = px(TABLE_CELL_PAD);
     let cell = table_cell_at(t, col);
     let range = t.cell_ranges.get(cell)?;
-    let content = t.cells.get(cell)?;
-    let in_cell = col.saturating_sub(range.start).min(content.len());
+    let content = t.projected.get(cell)?;
+    let in_cell = col.saturating_sub(range.start).min(range.len());
+    let display = display_col_in(Some(&content.map), in_cell).min(content.text.len());
     let cell_x = left + col_offset(&t.col_widths, t.cell_ranges.len(), cell, t.rtl);
     let cw = cell_span_width(&t.col_widths, t.cell_ranges.len(), cell);
     // The header is bold, so shape with the bold font or the caret lands left of
     // the (wider) bold glyphs; position_for_index gives the exact kerned x — and,
     // shaped at the cell's width, the wrap row's y for drag-narrowed columns.
-    let cf = cell_font(font, t.is_header);
     let line_h = font_size * LINE_HEIGHT_RATIO;
     let avail = (cw - pad * 2.).max(px(8.));
-    let wl = shape_cell(
-        window,
-        content,
-        &cf,
-        font_size,
-        Some(avail),
-        Hsla::default(),
-    )?;
-    let mut pos = wl.position_for_index(in_cell, line_h).unwrap_or_default();
+    let wl = shape_cell(window, content, font_size, Some(avail))?;
+    let mut pos = wl.position_for_index(display, line_h).unwrap_or_default();
     let wrapped = !wl.wrap_boundaries().is_empty();
     // A cell holding right-to-left text needs the same index↔x map the rest of
     // the editor uses: gpui's `position_for_index` collapses every offset in an
     // RTL run onto one x, which is a caret that won't move through the word.
     // Only an unwrapped cell can use it — a map's x's run along the single
     // pre-wrap line (same limit as elsewhere).
-    if !wrapped && zorite_markdown::syntax::contains_rtl(content) {
-        let map = gpui_bidi::shaped::map_of_wrapped(&wl, content.len());
-        pos.x = px(map.x_for_index(in_cell));
+    if !wrapped && zorite_markdown::syntax::contains_rtl(&content.text) {
+        let map = gpui_bidi::shaped::map_of_wrapped(&wl, content.text.len());
+        pos.x = px(map.x_for_index(display));
     }
-    let full_w = wl.width();
-    // Alignment shifts only unwrapped content (a wrapped cell fills its width).
-    let align_off = if wrapped {
+    let align_off = cell_alignment_offset(&wl, pos.y, line_h, avail, cell_alignment(t, cell));
+    Some((cell_x + pad + align_off + pos.x, pos.y, cell, in_cell))
+}
+
+/// Match GPUI's per-wrap-line paint alignment, including a short last line.
+fn cell_alignment(t: &TableRow, cell: usize) -> gpui::TextAlign {
+    match t.aligns.get(cell) {
+        Some(markdown_syntax::Align::Center) => gpui::TextAlign::Center,
+        Some(markdown_syntax::Align::Right) => gpui::TextAlign::Right,
+        _ if t.rtl => gpui::TextAlign::Right,
+        _ => gpui::TextAlign::Left,
+    }
+}
+
+fn cell_alignment_offset(
+    line: &WrappedLine,
+    y: Pixels,
+    line_h: Pixels,
+    available: Pixels,
+    align: gpui::TextAlign,
+) -> Pixels {
+    let row = ((y.max(px(0.)) / line_h) as usize).min(line.wrap_boundaries().len());
+    let boundary_x = |i: usize| {
+        let b = line.wrap_boundaries()[i];
+        line.runs()[b.run_ix].glyphs[b.glyph_ix].position.x
+    };
+    let start = if row == 0 {
         px(0.)
     } else {
-        match t.aligns.get(cell) {
-            Some(markdown_syntax::Align::Center) => (avail - full_w).max(px(0.)) / 2.,
-            Some(markdown_syntax::Align::Right) => (avail - full_w).max(px(0.)),
-            _ => px(0.),
-        }
+        boundary_x(row - 1)
     };
-    Some((cell_x + pad + align_off + pos.x, pos.y, cell, in_cell))
+    let end = if row == line.wrap_boundaries().len() {
+        line.unwrapped_layout.width
+    } else {
+        boundary_x(row)
+    };
+    let remaining = available - (end - start);
+    match align {
+        gpui::TextAlign::Left => px(0.),
+        gpui::TextAlign::Center => remaining / 2.,
+        gpui::TextAlign::Right => remaining,
+    }
 }
 
 /// The byte offset within `content` whose rendered x (from the text's left edge)
 /// is closest to `target` — hit-tests a click inside a table cell, using the
 /// shaped line so it matches the kerned glyphs.
 fn cell_offset_for_point(
-    content: &str,
+    content: &ProjectedCell,
     target: Point<Pixels>,
     wrap: Pixels,
-    font: &Font,
     font_size: Pixels,
     window: &mut Window,
 ) -> usize {
     let line_h = font_size * LINE_HEIGHT_RATIO;
-    let Some(wl) = shape_cell(
-        window,
-        content,
-        font,
-        font_size,
-        Some(wrap),
-        Hsla::default(),
-    ) else {
+    let Some(wl) = shape_cell(window, content, font_size, Some(wrap)) else {
         return 0;
     };
-    if wl.wrap_boundaries().is_empty() && zorite_markdown::syntax::contains_rtl(content) {
-        // Same reason as the caret above, in reverse.
-        let map = gpui_bidi::shaped::map_of_wrapped(&wl, content.len());
-        return map.index_for_x(f32::from(target.x));
-    }
-    match wl.closest_index_for_position(
-        point(
-            target.x,
-            target.y.max(px(0.)).min(wl.size(line_h).height - px(1.)),
-        ),
-        line_h,
-    ) {
-        Ok(i) | Err(i) => i,
-    }
+    let display = if wl.wrap_boundaries().is_empty()
+        && zorite_markdown::syntax::contains_rtl(&content.text)
+    {
+        gpui_bidi::shaped::map_of_wrapped(&wl, content.text.len()).index_for_x(f32::from(target.x))
+    } else {
+        match wl.closest_index_for_position(
+            point(
+                target.x,
+                target.y.max(px(0.)).min(wl.size(line_h).height - px(1.)),
+            ),
+            line_h,
+        ) {
+            Ok(i) | Err(i) => i,
+        }
+    };
+    content
+        .map
+        .get(display)
+        .copied()
+        .unwrap_or_else(|| *content.map.last().unwrap_or(&0))
 }
 
 /// Paint a table row as a grid (W4c): a top border (+ bottom on the last row),
@@ -1336,10 +1405,10 @@ pub(crate) fn paint_table_row(
     t: &TableRow,
     origin: Point<Pixels>,
     row_h: Pixels,
-    font: &Font,
+    _font: &Font,
     font_size: Pixels,
     line_h: Pixels,
-    color: Hsla,
+    _color: Hsla,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -1378,10 +1447,6 @@ pub(crate) fn paint_table_row(
         window.paint_quad(fill(Bounds::new(origin, size(table_w, thick)), t.border));
     }
     let pad = px(TABLE_CELL_PAD);
-    let mut cell_font = font.clone();
-    if t.is_header {
-        cell_font.weight = gpui::FontWeight::BOLD;
-    }
     for (c, &cw) in t.col_widths.iter().enumerate() {
         let x = origin.x + col_offset(&t.col_widths, t.cells.len(), c, t.rtl);
         // Inner cell separator at the left of every cell except the first (Grid
@@ -1396,24 +1461,26 @@ pub(crate) fn paint_table_row(
                 t.border,
             ));
         }
-        if let Some(cell) = t.cells.get(c).filter(|s| !s.is_empty()) {
+        if let Some(cell) = t.projected.get(c).filter(|s| !s.text.is_empty()) {
             // Shaped at the cell's width so a drag-narrowed column word-wraps
             // (the row height already reserves the wrap rows). Top-anchored at
             // the single-line pad, not centered — wraps grow downward. A short
             // row's last cell spans the remaining columns.
             let cw = cell_span_width(&t.col_widths, t.cells.len(), c);
             let avail = (cw - pad * 2.).max(px(8.));
-            if let Some(shaped) =
-                shape_cell(window, cell, &cell_font, font_size, Some(avail), color)
-            {
-                let align = match t.aligns.get(c) {
-                    Some(markdown_syntax::Align::Center) => gpui::TextAlign::Center,
-                    Some(markdown_syntax::Align::Right) => gpui::TextAlign::Right,
-                    // No explicit alignment: follow the table's direction, so
-                    // RTL cells start at the right like their text does.
-                    _ if t.rtl => gpui::TextAlign::Right,
-                    _ => gpui::TextAlign::Left,
-                };
+            if let Some(shaped) = shape_cell(window, cell, font_size, Some(avail)) {
+                let align = cell_alignment(t, c);
+                let _ = shaped.paint_background(
+                    point(x + pad, origin.y + px(6.)),
+                    line_h,
+                    align,
+                    Some(Bounds::new(
+                        point(x + pad, origin.y + px(6.)),
+                        size(avail, (row_h - px(12.)).max(line_h)),
+                    )),
+                    window,
+                    cx,
+                );
                 let _ = shaped.paint(
                     point(x + pad, origin.y + px(6.)),
                     line_h,

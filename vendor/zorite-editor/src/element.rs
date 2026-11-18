@@ -948,7 +948,7 @@ impl Element for EditorElement {
                 // The scroll thumb under a wide table: geometry + a
                 // hand-cursor hitbox here; paint draws it and mouse-down
                 // drags it (see `on_mouse_down`).
-                let avail = bounds.size.width - px(TABLE_GUTTER);
+                let avail = bounds.size.width - px(TABLE_GUTTER * 2.);
                 if width > avail {
                     let th_w = (avail / f32::from(width) * f32::from(avail)).max(px(24.));
                     let range = f32::from(width - avail);
@@ -1893,7 +1893,7 @@ impl Element for EditorElement {
                 // A wide table keeps natural columns, scrolled by sx and
                 // clipped to the viewport — rows paint shifted under a mask.
                 let table_w: Pixels = t.col_widths.iter().copied().sum();
-                let avail = bounds.size.width - px(TABLE_GUTTER);
+                let avail = bounds.size.width - px(TABLE_GUTTER * 2.);
                 // The clip band, on the side this table's gutter ISN'T (#66).
                 let (tleft, _) = table_visible_band(origin.x, bounds.size.width, t.rtl);
                 let content_left = self.editor.read(cx).table_left(t, i, &bounds);
@@ -2957,6 +2957,7 @@ fn shape_document(
             scan.generation.hash(&mut h);
             f32::from(base_font_size).to_bits().hash(&mut h);
             run_epoch.hash(&mut h);
+            wrap_width.map(|w| f32::from(w).to_bits()).hash(&mut h);
             if let Some(r) = col_resize {
                 r.header_row.hash(&mut h);
                 r.col.hash(&mut h);
@@ -2985,6 +2986,8 @@ fn shape_document(
                                 base_font_size,
                                 base_color,
                                 col_resize,
+                                wrap_width.map(|w| (w - px(TABLE_GUTTER * 2.)).max(px(0.))),
+                                md,
                             )
                         })
                         .collect(),
@@ -3299,6 +3302,11 @@ fn shape_document(
             None
         };
 
+        let sel_empty = selection.0 == selection.1;
+        let caret_col = (sel_empty && selection.0 >= line_start && selection.0 <= line_end)
+            .then(|| selection.0 - line_start);
+        let sel_touches = !sel_empty && selection.0 <= line_end && selection.1 >= line_start;
+
         // Table row (W4c + cell editing): renders as a grid row; the caret on a
         // header/body row edits in place (caret rendered inside the cell). Only the
         // caret on the `|---|` separator drops the whole table to raw source (to
@@ -3309,12 +3317,75 @@ fn shape_document(
             .filter(|&ri| !is_code && caret_row != Some(regions[ri].lines.start + 1))
             .map(|ri| {
                 let r = &regions[ri];
+                let ranges = markdown_syntax::table_cell_ranges(line);
+                let is_header = idx == r.lines.start;
+                let projection_key = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    line.hash(&mut h);
+                    run_epoch.hash(&mut h);
+                    is_header.hash(&mut h);
+                    caret_col.hash(&mut h);
+                    sel_touches
+                        .then(|| {
+                            (
+                                selection.0.saturating_sub(line_start),
+                                selection.1.min(line_end) - line_start,
+                            )
+                        })
+                        .hash(&mut h);
+                    h.finish()
+                };
+                let cached = caches
+                    .table_cells
+                    .borrow()
+                    .get(&projection_key)
+                    .filter(|(source, _)| source == line)
+                    .map(|(_, cells)| cells.clone());
+                let projected = cached.unwrap_or_else(|| {
+                    let font = if is_header {
+                        Font {
+                            weight: FontWeight::BOLD,
+                            ..base_font.clone()
+                        }
+                    } else {
+                        base_font.clone()
+                    };
+                    let cells: std::rc::Rc<Vec<ProjectedCell>> = std::rc::Rc::new(
+                        ranges
+                            .iter()
+                            .map(|range| {
+                                let caret = caret_col
+                                    .filter(|&c| c >= range.start && c <= range.end)
+                                    .map(|c| c - range.start);
+                                let selected = sel_touches
+                                    && selection.0 < line_start + range.end
+                                    && selection.1 > line_start + range.start;
+                                project_cell(
+                                    &line[range.clone()],
+                                    &font,
+                                    base_color,
+                                    md,
+                                    caret,
+                                    selected,
+                                )
+                            })
+                            .collect(),
+                    );
+                    caches
+                        .table_cells
+                        .borrow_mut()
+                        .insert(projection_key, (line.to_owned(), cells.clone()));
+                    cells
+                });
                 TableRow {
+                    projected,
+                    projection_key,
                     cells: markdown_syntax::table_cells(line)
                         .into_iter()
                         .map(|c| SharedString::from(c.to_string()))
                         .collect(),
-                    cell_ranges: markdown_syntax::table_cell_ranges(line),
+                    cell_ranges: ranges,
                     aligns: r.aligns.clone(),
                     col_widths: region_cols[ri].clone(),
                     is_header: idx == r.lines.start,
@@ -3334,19 +3405,14 @@ fn shape_document(
         // are hidden — except, on the caret's own line, the single construct the
         // caret sits in is revealed (per-construct reveal, #5: finer than the old
         // whole-line reveal, so the rest of the line stays rendered).
-        let sel_empty = selection.0 == selection.1;
-        let caret_col = (sel_empty && selection.0 >= line_start && selection.0 <= line_end)
-            .then(|| selection.0 - line_start);
         // An `![](src)` chip line shows full raw source while the caret is on it,
         // so editing reveals the whole `![](src)` rather than the per-construct
         // view. Image rows are exempt — they keep rendering the picture with the
         // caret parked beside it (Word-style; see the widget gate above).
         let chip_line =
             md.is_some() && img_row.is_some() && !matches!(widget, Some(Block::Image(_)));
-        let sel_touches = !sel_empty && selection.0 <= line_end && selection.1 >= line_start;
-        // A selection no longer reveals raw source (Cditor-style: formatting
-        // markers are hidden everywhere) — selected lines keep the hidden view;
-        // structural markers still come back via `reveal_inline`.
+        // Selected inline syntax reveals through `reveal_inline`; image embeds
+        // use their full source instead of an atomic widget while selected.
         let full_source = (caret_col.is_some() && chip_line) || (sel_touches && wiki_image);
         // This line's diagnostics, clipped + shifted to line-local byte offsets —
         // used as spell-check squiggles whether the line shows source or hides its
@@ -3444,9 +3510,7 @@ fn shape_document(
                 let (num, _) = ordered_nums[idx];
                 let delimiter = line.as_bytes()[plen - 2] as char;
                 let glyph = if ordered {
-                    // Word-style depth markers (1. -> a. -> i.), shared with
-                    // the reader. The level is structural (from the
-                    // renumbering pass), not an indent-width guess.
+                    // Keep decimal ordinals and the source delimiter at every depth.
                     format!("{num}{delimiter}")
                 } else {
                     "\u{2022}".to_string()
@@ -3866,7 +3930,8 @@ fn shape_document(
                         let row_key = {
                             use std::hash::{Hash, Hasher};
                             let mut h = std::collections::hash_map::DefaultHasher::new();
-                            line.hash(&mut h);
+                            t.projection_key.hash(&mut h);
+                            f32::from(base_font_size).to_bits().hash(&mut h);
                             for w in &t.col_widths {
                                 f32::from(*w).to_bits().hash(&mut h);
                             }
@@ -3880,10 +3945,8 @@ fn shape_document(
                             None => {
                                 let r = table_row_wrap_rows(
                                     window,
-                                    &t.cells,
+                                    &t.projected,
                                     &t.col_widths,
-                                    t.is_header,
-                                    base_font,
                                     base_font_size,
                                 );
                                 caches.cell_rows.borrow_mut().insert(row_key, r);
@@ -4021,6 +4084,10 @@ fn shape_document(
         let mut rows = caches.cell_rows.borrow_mut();
         if rows.len() > lines.len() * 2 + 64 {
             rows.clear();
+        }
+        let mut cells = caches.table_cells.borrow_mut();
+        if cells.len() > lines.len() * 2 + 64 {
+            cells.clear();
         }
         let mut lh = caches.line_heights.borrow_mut();
         if lh.len() > lines.len() * 2 + 64 {

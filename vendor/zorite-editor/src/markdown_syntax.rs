@@ -125,12 +125,9 @@ struct Style {
     /// A syntax marker (`**`, `#`, `[`, …) — dimmed when shown, and removed
     /// entirely when the line's markers are hidden (W6, reveal-on-caret).
     hide: bool,
-    /// A formatting marker (`**`, `*`, `~~`, `` ` ``, `<mark>`, `<u>`) stays
-    /// hidden even with the caret inside its construct — Cditor-style: the
-    /// styling IS the feedback, and the toggles (⌘B/I/U/…, the selection
-    /// format bar) edit it. Structural markers (links, headings, math) keep
-    /// the reveal, since their raw text is the only way to edit them.
-    always_hide: bool,
+    /// A paired formatting delimiter, used to reveal the containing construct
+    /// and distinguish its opener/closer from structural syntax.
+    format_marker: bool,
     /// Non-zero on a formatting marker: the opener and closer of one construct
     /// share an id, so `fmt_marker_pairs` can pair them even with NESTED
     /// constructs between (adjacency no longer identifies the pair).
@@ -278,13 +275,24 @@ fn run_for(
 /// only the construct the caret sits in (#5).
 fn construct_at(spans: &[Span], c: usize) -> Range<usize> {
     let mut pairs = Vec::new();
-    for (i, opener) in spans.iter().enumerate().filter(|(_, s)| s.style.pair_id != 0) {
-        if let Some(closer) = spans[i + 1..].iter().find(|s| s.style.pair_id == opener.style.pair_id) {
+    for (i, opener) in spans
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.style.pair_id != 0)
+    {
+        if let Some(closer) = spans[i + 1..]
+            .iter()
+            .find(|s| s.style.pair_id == opener.style.pair_id)
+        {
             let range = opener.range.start..closer.range.end;
-            if range.start <= c && c <= range.end { pairs.push(range); }
+            if range.start <= c && c <= range.end {
+                pairs.push(range);
+            }
         }
     }
-    if let Some(range) = pairs.into_iter().max_by_key(|r| r.len()) { return range; }
+    if let Some(range) = pairs.into_iter().max_by_key(|r| r.len()) {
+        return range;
+    }
     let mut i = 0;
     while i < spans.len() {
         let start = spans[i].range.start;
@@ -328,7 +336,57 @@ pub(crate) fn hidden_runs(
     reveal_inline: bool,
     md: &SyntaxStyle,
 ) -> (String, Vec<TextRun>, Vec<usize>) {
-    let mut spans = scan(line, md);
+    hidden_spans(
+        line,
+        scan(line, md),
+        base_font,
+        base_color,
+        diagnostics,
+        caret_col,
+        reveal_prefix,
+        hide_prefix,
+        reveal_inline,
+        md,
+    )
+}
+
+/// Inline-only table projection: cell contents must not be interpreted as
+/// headings, list prefixes or block widgets. Offsets remain cell-source bytes.
+pub(crate) fn cell_runs(
+    line: &str,
+    font: &Font,
+    color: Hsla,
+    caret: Option<usize>,
+    selected: bool,
+    md: &SyntaxStyle,
+) -> (String, Vec<TextRun>, Vec<usize>) {
+    let mut spans = Vec::new();
+    scan_inline(
+        line,
+        0,
+        line.len(),
+        md,
+        &mut spans,
+        &Style::default(),
+        0,
+        &mut 1,
+    );
+    hidden_spans(line, spans, font, color, &[], caret, 0, 0, selected, md)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hidden_spans(
+    line: &str,
+    mut spans: Vec<Span>,
+    base_font: &Font,
+    base_color: Hsla,
+    diagnostics: &[Diagnostic],
+    caret_col: Option<usize>,
+    reveal_prefix: usize,
+    hide_prefix: usize,
+    reveal_inline: bool,
+    md: &SyntaxStyle,
+) -> (String, Vec<TextRun>, Vec<usize>) {
     spans.sort_by_key(|s| s.range.start);
 
     // The construct (a maximal run of adjacent spans: its markers + body) the
@@ -353,8 +411,7 @@ pub(crate) fn hidden_runs(
         let in_construct = reveal.start <= span.range.start && span.range.end <= reveal.end;
         let in_prefix = span.range.end <= reveal_prefix;
         let force = span.range.end <= hide_prefix;
-        let hidden = span.style.hide
-            && (force || (!reveal_inline && !in_construct && !in_prefix));
+        let hidden = span.style.hide && (force || (!reveal_inline && !in_construct && !in_prefix));
         if !hidden {
             segs.push((span.range.clone(), Some(&span.style), None));
         } else if let Some(rep) = span.style.replace.clone() {
@@ -439,7 +496,7 @@ fn scan(text: &str, st: &SyntaxStyle) -> Vec<Span> {
     out
 }
 
-/// The always-hidden formatting-marker PAIRS on a line, as
+/// The formatting-marker PAIRS on a line, as
 /// `(opening range, closing range)` per construct — for the editor's
 /// Cditor-style delete (skip the invisible bytes; collapse an emptied pair).
 pub(crate) fn fmt_marker_pairs(line: &str, st: &SyntaxStyle) -> Vec<(Range<usize>, Range<usize>)> {
@@ -450,7 +507,7 @@ pub(crate) fn fmt_marker_pairs(line: &str, st: &SyntaxStyle) -> Vec<(Range<usize
     // adjacency walk assumed at most one body span).
     let mut open: Vec<(u16, Range<usize>)> = Vec::new();
     let mut pairs = Vec::new();
-    for sp in spans.into_iter().filter(|s| s.style.always_hide) {
+    for sp in spans.into_iter().filter(|s| s.style.format_marker) {
         let id = sp.style.pair_id;
         if id == 0 {
             continue;
@@ -478,9 +535,6 @@ fn marker(out: &mut Vec<Span>, range: Range<usize>, color: Hsla) {
     });
 }
 
-/// A formatting marker that NEVER reveals (not even with the caret inside its
-/// construct) — see [`Style::always_hide`]. The construct's opener and closer
-/// share `pair_id` (see [`fmt_marker_pairs`]).
 /// `0xRRGGBBAA` (from `syntax::css_color`) as a gpui color.
 fn hsla_of(rgba: u32) -> Hsla {
     gpui::rgba(rgba).into()
@@ -492,7 +546,7 @@ fn fmt_marker(out: &mut Vec<Span>, range: Range<usize>, color: Hsla, pair_id: u1
         style: Style {
             color: Some(color),
             hide: true,
-            always_hide: true,
+            format_marker: true,
             pair_id,
             ..Default::default()
         },
@@ -734,74 +788,38 @@ fn scan_inline(
             i += n;
             continue;
         }
-        // A triple run is one combined construct, not bold plus stray stars.
-        if c == b'*' && !is_backslash_escaped(b, i)
-            && i + 3 < end && &b[i..i+3] == b"***"
-            && let Some(close) = (i+3..end.saturating_sub(2)).find(|&k|
-                &b[k..k+3] == b"***" && !is_backslash_escaped(b,k))
-            && close > i+3
-        {
-            let id = *next_id; *next_id += 1;
-            fmt_marker(out, i..i+3, st.marker, id);
-            scan_styled_body(text, i+3, close, st, out,
-                Style { bold:true, italic:true, ..Default::default() }.over(base), depth, next_id);
-            fmt_marker(out, close..close+3, st.marker, id);
-            i=close+3; continue;
-        }
-        // Bold: **text** (check before single-* italic). A `\*` (escaped)
-        // opener or closer is literal text, matching the reader's CommonMark.
-        if c == b'*'
-            && !is_backslash_escaped(b, i)
-            && i + 1 < end
-            && b[i + 1] == b'*'
-            && let Some(close) = find2_unescaped(b, i + 2, end, b'*', b'*')
-        {
-            let id = *next_id;
-            *next_id += 1;
-            fmt_marker(out, i..i + 2, st.marker, id);
-            scan_styled_body(
-                text,
-                i + 2,
-                close,
-                st,
-                out,
-                Style {
-                    bold: true,
-                    ..Default::default()
-                }
-                .over(base),
-                depth,
-                next_id,
-            );
-            fmt_marker(out, close..close + 2, st.marker, id);
-            i = close + 2;
-            continue;
-        }
-        // Italic: *text* — escaped `\*` stays literal.
-        if c == b'*'
-            && !is_backslash_escaped(b, i)
-            && let Some(close) = find1_unescaped(b, i + 1, end, b'*')
-            && close > i + 1
-        {
-            let id = *next_id;
-            *next_id += 1;
-            fmt_marker(out, i..i + 1, st.marker, id);
-            scan_styled_body(
-                text,
-                i + 1,
-                close,
-                st,
-                out,
-                Style {
-                    italic: true,
-                    ..Default::default()
-                }
-                .over(base),
-                depth,
-                next_id,
-            );
-            fmt_marker(out, close..close + 1, st.marker, id);
-            i = close + 1;
+        // Match delimiter runs as units. Nested emphasis and literal code must
+        // not donate a closer to their enclosing construct.
+        if c == b'*' && !is_backslash_escaped(b, i) {
+            let run = b[i..end].iter().take_while(|&&v| v == c).count();
+            let width = if run == 4 { 2 } else { run.min(3) };
+            if i + width < end
+                && !b[i + width].is_ascii_whitespace()
+                && let Some(close) = find_emphasis_close(b, i + width, end, c, width, 0)
+            {
+                let id = *next_id;
+                *next_id += 1;
+                fmt_marker(out, i..i + width, st.marker, id);
+                scan_styled_body(
+                    text,
+                    i + width,
+                    close,
+                    st,
+                    out,
+                    Style {
+                        bold: width >= 2,
+                        italic: width != 2,
+                        ..Default::default()
+                    }
+                    .over(base),
+                    depth,
+                    next_id,
+                );
+                fmt_marker(out, close..close + width, st.marker, id);
+                i = close + width;
+                continue;
+            }
+            i += run;
             continue;
         }
         // Underscore emphasis (__bold__ / _italic_), CommonMark's flanking
@@ -1211,10 +1229,70 @@ fn find1(b: &[u8], from: usize, end: usize, c: u8) -> Option<usize> {
     (from..end).find(|&k| b[k] == c)
 }
 
-/// First UNESCAPED index of byte `c` — a `\`-escaped occurrence (odd
-/// preceding backslash run) is literal text, not a marker (CommonMark).
-fn find1_unescaped(b: &[u8], from: usize, end: usize, c: u8) -> Option<usize> {
-    (from..end).find(|&k| b[k] == c && !is_backslash_escaped(b, k))
+/// End of a code span starting at `start`, or None for unmatched backticks.
+fn code_span_end(b: &[u8], start: usize, end: usize) -> Option<usize> {
+    let width = b[start..end].iter().take_while(|&&v| v == b'`').count();
+    let mut j = start + width;
+    while j < end {
+        if b[j] == b'`' {
+            let n = b[j..end].iter().take_while(|&&v| v == b'`').count();
+            if n == width {
+                return Some(j + n);
+            }
+            j += n;
+        } else {
+            j += 1;
+        }
+    }
+    None
+}
+
+/// Find a matching run, skipping escaped punctuation, code, and complete nested
+/// runs. The bound matches the inline scanner's recursion limit.
+fn find_emphasis_close(
+    b: &[u8],
+    from: usize,
+    end: usize,
+    marker: u8,
+    width: usize,
+    depth: u8,
+) -> Option<usize> {
+    let mut j = from;
+    while j < end {
+        if b[j] == b'\\' && j + 1 < end && b[j + 1].is_ascii_punctuation() {
+            j += 2;
+            continue;
+        }
+        if b[j] == b'`'
+            && let Some(code_end) = code_span_end(b, j, end)
+        {
+            j = code_end;
+            continue;
+        }
+        if b[j] != marker {
+            j += 1;
+            continue;
+        }
+        let run = b[j..end].iter().take_while(|&&v| v == marker).count();
+        let can_close = j > 0 && !b[j - 1].is_ascii_whitespace();
+        let can_open = j + run < end && !b[j + run].is_ascii_whitespace();
+        if run >= width && can_close && (run == width || !can_open || j == from) {
+            return Some(j);
+        }
+        if can_open && depth < 8 {
+            let nested = run.min(3);
+            if let Some(close) = find_emphasis_close(b, j + nested, end, marker, nested, depth + 1)
+            {
+                j = close + nested;
+                continue;
+            }
+        }
+        if run >= width && can_close {
+            return Some(j);
+        }
+        j += run;
+    }
+    None
 }
 
 /// First index of the pair `c1 c2` in `b[from..end]`.
@@ -1224,8 +1302,8 @@ fn find2(b: &[u8], from: usize, end: usize, c1: u8, c2: u8) -> Option<usize> {
 
 /// First UNESCAPED index of the pair — see [`find1_unescaped`].
 fn find2_unescaped(b: &[u8], from: usize, end: usize, c1: u8, c2: u8) -> Option<usize> {
-    (from..end.saturating_sub(1))
-        .find(|&k| b[k] == c1 && b[k + 1] == c2 && !is_backslash_escaped(b, k))
+    debug_assert_eq!(c1, c2);
+    find_emphasis_close(b, from, end, c1, 2, 0)
 }
 
 /// A "word" byte for `_`-emphasis flanking: ASCII alphanumerics, plus any
@@ -1521,7 +1599,7 @@ pub(crate) fn ordered_numbers(lines: &[&str]) -> Vec<(u32, usize)> {
     for (i, line) in lines.iter().enumerate() {
         let Some((_, indent, ordered, source_number)) = list_prefix(line) else {
             // Indented text hangs under the innermost item; anything else —
-            // including a blank line — ends the open lists.
+            // unindented prose — ends the open lists; blanks allow loose lists.
             let ws = line
                 .bytes()
                 .take_while(|b| matches!(b, b' ' | b'\t'))
@@ -2169,10 +2247,10 @@ pub(crate) fn property_regions(content: &str) -> Vec<Range<usize>> {
 /// Split a `| a | b |` row into trimmed cell strings (the bounding pipes drop the
 /// empty leading/trailing cells they'd otherwise create).
 pub(crate) fn table_cells(line: &str) -> Vec<&str> {
-    let t = line.trim();
-    let t = t.strip_prefix('|').unwrap_or(t);
-    let t = t.strip_suffix('|').unwrap_or(t);
-    split_unescaped_pipes(t).map(str::trim).collect()
+    table_cell_ranges(line)
+        .into_iter()
+        .map(|r| &line[r])
+        .collect()
 }
 
 /// Split `s` at its UNESCAPED `|` bytes — a `\|` (odd run of preceding
@@ -2206,24 +2284,30 @@ fn is_backslash_escaped(b: &[u8], i: usize) -> bool {
 /// rendered cell and hit-test a click back to a source offset. An empty cell is a
 /// zero-width range at its content position.
 pub(crate) fn table_cell_ranges(line: &str) -> Vec<Range<usize>> {
-    let (Some(first), Some(last)) = (line.find('|'), line.rfind('|')) else {
+    let start = line.len() - line.trim_start().len();
+    let end = line.trim_end().len();
+    if start >= end {
         return Vec::new();
+    }
+    let start = start + usize::from(line.as_bytes()[start] == b'|');
+    let end = if end > start
+        && line.as_bytes()[end - 1] == b'|'
+        && !is_backslash_escaped(line.as_bytes(), end - 1)
+    {
+        end - 1
+    } else {
+        end
     };
-    if last <= first {
-        return Vec::new();
-    }
-    let base = first + 1; // start of the inter-pipe region in `line`
-    let inner = &line[base..last];
-    let mut out = Vec::new();
-    let mut seg = 0; // offset of the current cell within `inner`
-    for piece in split_unescaped_pipes(inner) {
-        let lead = piece.len() - piece.trim_start().len();
-        let trail = piece.len() - piece.trim_end().len();
-        let start = base + seg + lead;
-        out.push(start..(base + seg + piece.len() - trail).max(start));
-        seg += piece.len() + 1; // + the `|`
-    }
-    out
+    let mut offset = start;
+    split_unescaped_pipes(&line[start..end])
+        .map(|piece| {
+            let lead = piece.len() - piece.trim_start().len();
+            let finish = piece.trim_end().len().max(lead);
+            let range = offset + lead..offset + finish;
+            offset += piece.len() + 1;
+            range
+        })
+        .collect()
 }
 
 /// If `line` is a table separator row (every cell is dashes with optional
@@ -2265,10 +2349,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sprint2_table_inline_projection_and_source_ranges() {
+        let st = test_style();
+        let font = gpui::font("Helvetica");
+        for (src, expected) in [
+            ("**Bold**", "Bold"),
+            ("*Italic*", "Italic"),
+            ("[Link](https://example.com)", "Link"),
+            ("`code`", "code"),
+            (r"Escaped \| pipe", "Escaped | pipe"),
+            ("# literal heading", "# literal heading"),
+            ("7. literal ordinal", "7. literal ordinal"),
+            ("**Привет 🙂**", "Привет 🙂"),
+        ] {
+            let (text, runs, map) = cell_runs(src, &font, Hsla::default(), None, false, &st);
+            assert_eq!(text, expected);
+            assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), text.len());
+            assert_eq!(map.len(), text.len() + 1);
+            for (i, _) in text.char_indices() {
+                assert!(src.is_char_boundary(map[i]));
+            }
+            let (revealed, _, _) = cell_runs(src, &font, Hsla::default(), None, true, &st);
+            assert_eq!(revealed, src);
+        }
+        let (_, runs, _) = cell_runs(
+            "**Bold** *Italic* `code`",
+            &font,
+            Hsla::default(),
+            None,
+            false,
+            &st,
+        );
+        assert!(runs.iter().any(|r| r.font.weight == FontWeight::BOLD));
+        assert!(runs.iter().any(|r| r.font.style == FontStyle::Italic));
+        assert!(runs.iter().any(|r| r.font.family == st.mono.family));
+        for row in [
+            "| **Bold** | \u{1f642} |",
+            "  | **Bold** | \u{1f642}  \r",
+            r"| a\|b | `c\|d` |",
+            "|   | x |",
+        ] {
+            let cells = table_cells(row);
+            let ranges = table_cell_ranges(row);
+            assert_eq!(
+                cells,
+                ranges.iter().map(|r| &row[r.clone()]).collect::<Vec<_>>()
+            );
+            assert_eq!(cells.len(), 2, "{row}");
+        }
+    }
+
+    #[test]
     fn sprint2_numbered_lists_keep_source_start_and_nested_start() {
-        assert_eq!(ordered_numbers(&["7. First", "8. Second", "9. Third"]), vec![(7,0),(8,0),(9,0)]);
-        assert_eq!(ordered_numbers(&["7. First", "  4. Nested", "  5. Nested", "8. Second"]), vec![(7,0),(4,1),(5,1),(8,0)]);
-        assert_eq!(ordered_numbers(&["7. First", "", "8. Second", "paragraph", "20. Separate"]), vec![(7,0),(0,0),(8,0),(0,0),(20,0)]);
+        assert_eq!(
+            ordered_numbers(&["7. First", "8. Second", "9. Third"]),
+            vec![(7, 0), (8, 0), (9, 0)]
+        );
+        assert_eq!(
+            ordered_numbers(&["7. First", "  4. Nested", "  5. Nested", "8. Second"]),
+            vec![(7, 0), (4, 1), (5, 1), (8, 0)]
+        );
+        assert_eq!(
+            ordered_numbers(&["7. First", "", "8. Second", "paragraph", "20. Separate"]),
+            vec![(7, 0), (0, 0), (8, 0), (0, 0), (20, 0)]
+        );
     }
 
     #[test]
@@ -2286,35 +2430,76 @@ mod tests {
             ("**bold**normal", "boldnormal"),
             ("*italic*normal", "italicnormal"),
             ("~~strikethrough~~", "strikethrough"),
-            ("**bold with *nested italic* inside**", "bold with nested italic inside"),
+            (
+                "**bold with *nested italic* inside**",
+                "bold with nested italic inside",
+            ),
             (r"\*literal asterisks\*", "*literal asterisks*"),
+            ("*italic with **bold** inside*", "italic with bold inside"),
+            ("**bold with `**` literal**", "bold with ** literal"),
+            ("**bold *nested***", "bold nested"),
+            ("*italic **nested***", "italic nested"),
+            ("***with `***` code***", "with *** code"),
+            ("a * spaced* and ** spaced**", "a * spaced* and ** spaced**"),
             ("`**literal** | \u{1f642}`", "**literal** | \u{1f642}"),
         ] {
-            let (display,runs,map)=hidden_runs(source,&font,Hsla::default(),&[],None,0,0,false,&st);
-            assert_eq!(display,expected,"{source}");
-            assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(),display.len());
-            assert_eq!(map.len(),display.len()+1);
-            assert!(map.windows(2).all(|w| w[0]<=w[1]));
-            for (d,_) in display.char_indices() { assert!(source.is_char_boundary(map[d])); }
+            let (display, runs, map) =
+                hidden_runs(source, &font, Hsla::default(), &[], None, 0, 0, false, &st);
+            assert_eq!(display, expected, "{source}");
+            assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), display.len());
+            assert_eq!(map.len(), display.len() + 1);
+            assert!(map.windows(2).all(|w| w[0] <= w[1]));
+            for (d, _) in display.char_indices() {
+                assert!(source.is_char_boundary(map[d]));
+            }
         }
-        assert_eq!(emphasis_spans("***both***"), vec![("both".into(),true,true)]);
+        assert_eq!(
+            emphasis_spans("***both***"),
+            vec![("both".into(), true, true)]
+        );
+        let (_, runs, _) = cell_runs(
+            "*italic with **bold** inside*",
+            &font,
+            Hsla::default(),
+            None,
+            false,
+            &st,
+        );
+        assert!(runs.iter().all(|r| r.font.style == FontStyle::Italic));
+        assert!(runs.iter().any(|r| r.font.weight == FontWeight::BOLD));
     }
 
     #[test]
     fn sprint2_caret_reveals_only_relevant_formatting() {
-        let st=test_style(); let font=gpui::font("Helvetica");
-        let source="**bold**normal *italic*";
-        let (display,_,_)=hidden_runs(source,&font,Hsla::default(),&[],Some(3),0,0,false,&st);
-        assert_eq!(display,"**bold**normal italic");
-        let (display,_,_)=hidden_runs(source,&font,Hsla::default(),&[],None,0,0,false,&st);
-        assert_eq!(display,"boldnormal italic");
+        let st = test_style();
+        let font = gpui::font("Helvetica");
+        let source = "**bold**normal *italic*";
+        let (display, _, _) = hidden_runs(
+            source,
+            &font,
+            Hsla::default(),
+            &[],
+            Some(3),
+            0,
+            0,
+            false,
+            &st,
+        );
+        assert_eq!(display, "**bold**normal italic");
+        let (display, _, _) =
+            hidden_runs(source, &font, Hsla::default(), &[], None, 0, 0, false, &st);
+        assert_eq!(display, "boldnormal italic");
     }
 
     #[test]
     fn copies_preserve_source_positions() {
-        let doc="1. a\n7. b\n  3. c\n  9. d\n5. e";
-        for range in [0..doc.len(), doc.find("7.").unwrap()..doc.len(), doc.find('b').unwrap()..doc.find('c').unwrap()+1] {
-            assert_eq!(copy_source(doc,range.clone()),doc[range]);
+        let doc = "1. a\n7. b\n  3. c\n  9. d\n5. e";
+        for range in [
+            0..doc.len(),
+            doc.find("7.").unwrap()..doc.len(),
+            doc.find('b').unwrap()..doc.find('c').unwrap() + 1,
+        ] {
+            assert_eq!(copy_source(doc, range.clone()), doc[range]);
         }
     }
 
@@ -2322,9 +2507,7 @@ mod tests {
     fn selection_reveal_shows_inline_but_not_prefix() {
         let (font, c, st) = (Font::default(), Hsla::default(), test_style());
         // A selected list line: the `- ` prefix stays hidden behind its
-        // painted bullet — and formatting markers stay hidden too now
-        // (always_hide wins over the selection reveal; structural markers
-        // like links still come back).
+        // painted bullet; inline markers reveal so they can be selected.
         let (disp, _, _) = hidden_runs("- a **b** c", &font, c, &[], None, 0, 2, true, &st);
         assert_eq!(disp, "a **b** c");
         let (disp, _, _) = hidden_runs("- [t](u) c", &font, c, &[], None, 0, 2, true, &st);
@@ -3154,23 +3337,32 @@ mod tests {
 
     #[test]
     fn formatting_markers_reveal_on_caret() {
-        let font=gpui::font("Helvetica"); let st=test_style();
-        for line in ["**bold** x", "*it* x", "~~s~~ x", "`c` x", "<u>u</u> x", "<mark>m</mark> x"] {
-            let (d,_,_)=hidden_runs(line,&font,Hsla::default(),&[],Some(2),0,0,false,&st);
-            assert_eq!(d,line);
+        let font = gpui::font("Helvetica");
+        let st = test_style();
+        for line in [
+            "**bold** x",
+            "*it* x",
+            "~~s~~ x",
+            "`c` x",
+            "<u>u</u> x",
+            "<mark>m</mark> x",
+        ] {
+            let (d, _, _) =
+                hidden_runs(line, &font, Hsla::default(), &[], Some(2), 0, 0, false, &st);
+            assert_eq!(d, line);
         }
     }
 
     #[test]
     fn ordered_numbers_markdown_starts() {
-        // A nested list counts on its own from 1 (whatever the digits say)
-        // one level deeper, and the outer list resumes after it. The level
+        // A nested list starts at its own source ordinal one level deeper,
+        // and the outer list resumes after it. The level
         // is structural — ANY deeper indent nests, whatever the tab setting.
         assert_eq!(
             ordered_numbers(&["1. a", "2. b", "  3. c", "  9. d", "6. e"]),
             vec![(1, 0), (2, 0), (3, 1), (4, 1), (3, 0)]
         );
-        // Source digits are display-irrelevant; every list starts at 1.
+        // The first source ordinal determines the rendered sequence.
         assert_eq!(ordered_numbers(&["5. a", "9. b"]), vec![(5, 0), (6, 0)]);
         // A bullet at the same indent ends the ordered run (bullets still
         // occupy a level for anything nested under them).
