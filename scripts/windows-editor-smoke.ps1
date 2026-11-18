@@ -10,6 +10,9 @@ $preservedPath=Join-Path $editorVault '04 Preserved.md'
 [IO.File]::WriteAllText($tablePath,$table,[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $editorVault '03 Other.md'),'Other tab',[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText($preservedPath,$preserved,[Text.UTF8Encoding]::new($true))
+$wrappedList='7. '+('A long list item with ordinary words and **formatting** to exercise wrapped navigation. '*10)+"`n8. Second item`n`nAfter."
+$wrappedListPath=Join-Path $editorVault '05 Wrapped.md'
+[IO.File]::WriteAllText($wrappedListPath,$wrappedList,[Text.UTF8Encoding]::new($false))
 $preservedHash=(Get-FileHash $preservedPath).Hash
 function Check-EditorSource([string]$Expected,[string]$Path,[string]$Message) {
     [System.Windows.Forms.Clipboard]::SetText([Guid]::NewGuid().ToString())
@@ -34,7 +37,8 @@ Check-EditorSource $preview $previewPath 'Inline insertion undo'
 [System.Windows.Forms.SendKeys]::SendWait('^+z')
 Check-EditorSource $inserted $previewPath 'Inline insertion redo'
 # Keep a one-character selection and undo history while switching entities/tabs.
-[System.Windows.Forms.SendKeys]::SendWait('^{HOME}{RIGHT 8}+{RIGHT}')
+[System.Windows.Forms.SendKeys]::SendWait('^{HOME}{RIGHT 8}+{RIGHT}^c')
+Wait-ImageCondition { [System.Windows.Forms.Clipboard]::GetText() -ceq 'X' } 'Selection was not acknowledged before switching tabs'
 Open-EditorFixture 2 '03 Other.md'
 Open-EditorFixture 0 '01 Preview.md'
 [System.Windows.Forms.SendKeys]::SendWait('R')
@@ -79,6 +83,12 @@ $tableEdit=$table.Replace('**Bold**','**XBold**')
 Check-EditorSource $tableEdit $tablePath 'Table caret mapping inserted in the wrong cell/source position'
 [System.Windows.Forms.SendKeys]::SendWait('^z')
 Check-EditorSource $table $tablePath 'Table edit undo changed unrelated source'
+# A byte column of two in Latin text would land inside the first Japanese
+# character without UTF-8 clamping when moving to the next row.
+[System.Windows.Forms.SendKeys]::SendWait('^{HOME}{DOWN}{TAB}{TAB}{RIGHT 2}{DOWN}Q')
+Check-EditorSource ($table.Replace('日本語 🙂','Q日本語 🙂')) $tablePath 'Cross-cell vertical movement split Unicode'
+[System.Windows.Forms.SendKeys]::SendWait('^z')
+Check-EditorSource $table $tablePath 'Unicode table navigation edit undo'
 # Tab is cell navigation. Repeated vertical movement must not split Unicode.
 [System.Windows.Forms.SendKeys]::SendWait('^{HOME}{DOWN}{TAB}{TAB}{DOWN}{LEFT}{UP}{DOWN}')
 Check-EditorSource $table $tablePath 'Table navigation changed source or failed on Unicode'
@@ -97,6 +107,19 @@ public static class EditorSmokeWindow {
 Check-EditorSource $tableEdit $tablePath 'Narrow table caret mapping'
 [System.Windows.Forms.SendKeys]::SendWait('^z')
 Check-EditorSource $table $tablePath 'Narrow table undo'
+# Down must visit the second wrapped visual line of Details, not the next row.
+[System.Windows.Forms.SendKeys]::SendWait('^{HOME}{DOWN}{TAB}{DOWN}Z^s')
+Wait-ImageCondition { [IO.File]::ReadAllText($tablePath).Contains('Z') } 'Wrapped table movement did not insert'
+$wrappedEdit=[IO.File]::ReadAllText($tablePath)
+$at=$wrappedEdit.IndexOf('Z')
+$sentenceStart=$table.IndexOf('A longer sentence')
+$sentenceEnd=$table.IndexOf(' | Café')
+if ($wrappedEdit.Remove($at,1) -cne $table -or $at -le $sentenceStart -or $at -ge $sentenceEnd) {
+    throw 'Down skipped a wrapped table line or edited outside the intended cell'
+}
+Check-EditorSource $wrappedEdit $tablePath 'Wrapped table source mapping'
+[System.Windows.Forms.SendKeys]::SendWait('^z')
+Check-EditorSource $table $tablePath 'Wrapped table movement edit undo'
 [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
 $shot=Capture-Images 'editor-table-narrow.png';$shot.Dispose()
 [void][EditorSmokeWindow]::MoveWindow($mainWindow,0,0,1100,760,$true)
@@ -105,7 +128,8 @@ Open-EditorFixture 3 '04 Preserved.md'
 Wait-ImageCondition { (Get-FileHash $preservedPath).Hash -eq $preservedHash } 'Unchanged BOM/CRLF/YAML preservation'
 [System.Windows.Forms.SendKeys]::SendWait('^{END}x^s')
 Wait-SavedText $preservedPath ($preserved+'x') 'Editing BOM/CRLF fixture changed unrelated source'
-[System.Windows.Forms.SendKeys]::SendWait('^z^s')
+[System.Windows.Forms.SendKeys]::SendWait('^z')
+[System.Windows.Forms.SendKeys]::SendWait('^s')
 Wait-ImageCondition { (Get-FileHash $preservedPath).Hash -eq $preservedHash } 'Undo did not restore exact BOM/CRLF/YAML bytes'
 # Close and reopen to verify disk -> fresh editor preservation too.
 [System.Windows.Forms.SendKeys]::SendWait('^w')
@@ -113,6 +137,26 @@ Wait-ImageCondition { (Active-ImagePath) -ne '04 Preserved.md' } 'Preservation f
 Open-EditorFixture 3 '04 Preserved.md'
 [System.Windows.Forms.SendKeys]::SendWait('^{END}x^s')
 Wait-SavedText $preservedPath ($preserved+'x') 'Reopened fixture changed unrelated source'
-[System.Windows.Forms.SendKeys]::SendWait('^z^s')
+[System.Windows.Forms.SendKeys]::SendWait('^z')
+[System.Windows.Forms.SendKeys]::SendWait('^s')
 Wait-ImageCondition { (Get-FileHash $preservedPath).Hash -eq $preservedHash } 'Reopened fixture undo lost original bytes'
+Open-EditorFixture 4 '05 Wrapped.md'
+Check-EditorSource $wrappedList $wrappedListPath 'Wrapped list original ordinals'
+[System.Windows.Forms.SendKeys]::SendWait('^{HOME}{DOWN}Z^s')
+Wait-ImageCondition { [IO.File]::ReadAllText($wrappedListPath).Contains('Z') } 'Wrapped list movement did not insert'
+$listEdit=[IO.File]::ReadAllText($wrappedListPath)
+$at=$listEdit.IndexOf('Z')
+if ($listEdit.Remove($at,1) -cne $wrappedList -or $at -le 3 -or $at -ge $wrappedList.IndexOf("`n")) {
+    throw 'Down skipped a wrapped list line or changed its marker'
+}
+Check-EditorSource $listEdit $wrappedListPath 'Wrapped list visual/source mapping'
+[System.Windows.Forms.SendKeys]::SendWait('^z')
+Check-EditorSource $wrappedList $wrappedListPath 'Wrapped list edit undo'
+# Inserting an item may add its marker, but must not rewrite later ordinals.
+[System.Windows.Forms.SendKeys]::SendWait('^{HOME}{END}{ENTER}New')
+$listInserted=$wrappedList.Replace("`n8. Second", "`n8. New`n8. Second")
+Check-EditorSource $listInserted $wrappedListPath 'List continuation rewrote unrelated source ordinals'
+[System.Windows.Forms.SendKeys]::SendWait('^z')
+[System.Windows.Forms.SendKeys]::SendWait('^z')
+Check-EditorSource $wrappedList $wrappedListPath 'List structural edit undo'
 'PASS: rapid formatting-boundary navigation, typing/delete/backspace, multi-block selection, undo/redo, tab selection/history, Unicode clipboard/grapheme deletion, table cell navigation/editing at wide and narrow widths, exact BOM/CRLF/YAML save and reopen.' | Tee-Object (Join-Path $resultDir 'editor-result.txt')

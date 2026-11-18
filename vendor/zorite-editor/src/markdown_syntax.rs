@@ -371,7 +371,43 @@ pub(crate) fn cell_runs(
         0,
         &mut 1,
     );
-    hidden_spans(line, spans, font, color, &[], caret, 0, 0, selected, md)
+    // GFM consumes the table pipe escape even inside inline code. Keep the
+    // backslash in source and reveal it with the active code construct.
+    let mut cell_spans = Vec::with_capacity(spans.len());
+    for span in spans {
+        if span.style.mono {
+            let mut start = span.range.start;
+            for i in span.range.clone() {
+                if line.as_bytes()[i] == b'\\'
+                    && line.as_bytes().get(i + 1) == Some(&b'|')
+                    && !is_backslash_escaped(line.as_bytes(), i)
+                {
+                    if start < i {
+                        push(&mut cell_spans, start..i, span.style.clone());
+                    }
+                    marker(&mut cell_spans, i..i + 1, md.marker);
+                    start = i + 1;
+                }
+            }
+            if start < span.range.end {
+                push(&mut cell_spans, start..span.range.end, span.style);
+            }
+        } else {
+            cell_spans.push(span);
+        }
+    }
+    hidden_spans(
+        line,
+        cell_spans,
+        font,
+        color,
+        &[],
+        caret,
+        0,
+        0,
+        selected,
+        md,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1594,10 +1630,10 @@ pub(crate) fn list_prefix(line: &str) -> Option<(usize, usize, bool, u32)> {
 /// marker-type change ends a run, while blank/indented continuation lines do not.
 pub(crate) fn ordered_numbers(lines: &[&str]) -> Vec<(u32, usize)> {
     let mut out = vec![(0u32, 0usize); lines.len()];
-    // One entry per open list level: (indent, is_ordered, next number).
-    let mut stack: Vec<(usize, bool, u32)> = Vec::new();
+    // One entry per open list level: (indent, source delimiter, next number).
+    let mut stack: Vec<(usize, u8, u32)> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
-        let Some((_, indent, ordered, source_number)) = list_prefix(line) else {
+        let Some((prefix, indent, ordered, source_number)) = list_prefix(line) else {
             // Indented text hangs under the innermost item; anything else —
             // unindented prose — ends the open lists; blanks allow loose lists.
             let ws = line
@@ -1611,16 +1647,17 @@ pub(crate) fn ordered_numbers(lines: &[&str]) -> Vec<(u32, usize)> {
             }
             continue;
         };
+        let delimiter = line.as_bytes()[prefix - 2];
         while stack.last().is_some_and(|&(ind, ..)| ind > indent) {
             stack.pop();
         }
         let depth = stack.len();
         match stack.last_mut() {
-            Some((ind, ord, next)) if *ind == indent => {
-                if *ord != ordered {
+            Some((ind, marker, next)) if *ind == indent => {
+                if *marker != delimiter {
                     // A different marker type at the same indent starts a
                     // new list.
-                    *ord = ordered;
+                    *marker = delimiter;
                     *next = source_number;
                 }
                 if ordered {
@@ -1629,7 +1666,7 @@ pub(crate) fn ordered_numbers(lines: &[&str]) -> Vec<(u32, usize)> {
                 }
             }
             _ => {
-                stack.push((indent, ordered, source_number.saturating_add(1)));
+                stack.push((indent, delimiter, source_number.saturating_add(1)));
                 out[i] = (source_number, depth);
             }
         }
@@ -2358,6 +2395,7 @@ mod tests {
             ("[Link](https://example.com)", "Link"),
             ("`code`", "code"),
             (r"Escaped \| pipe", "Escaped | pipe"),
+            (r"`code\|pipe`", "code|pipe"),
             ("# literal heading", "# literal heading"),
             ("7. literal ordinal", "7. literal ordinal"),
             ("**Привет 🙂**", "Привет 🙂"),
@@ -2401,6 +2439,10 @@ mod tests {
 
     #[test]
     fn sprint2_numbered_lists_keep_source_start_and_nested_start() {
+        assert_eq!(
+            ordered_numbers(&["7. First", "20) Separate", "20) Next"]),
+            vec![(7, 0), (20, 0), (21, 0)]
+        );
         assert_eq!(
             ordered_numbers(&["7. First", "8. Second", "9. Third"]),
             vec![(7, 0), (8, 0), (9, 0)]
