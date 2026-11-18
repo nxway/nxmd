@@ -1306,7 +1306,7 @@ pub(crate) fn table_caret_pos(
     let line_h = font_size * LINE_HEIGHT_RATIO;
     let avail = (cw - pad * 2.).max(px(8.));
     let wl = shape_cell(window, content, font_size, Some(avail))?;
-    let mut pos = wl.position_for_index(display, line_h).unwrap_or_default();
+    let mut pos = crate::table_layout::cell_position(&wl, display, line_h);
     let wrapped = !wl.wrap_boundaries().is_empty();
     // A cell holding right-to-left text needs the same index↔x map the rest of
     // the editor uses: gpui's `position_for_index` collapses every offset in an

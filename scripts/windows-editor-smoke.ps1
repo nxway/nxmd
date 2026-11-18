@@ -120,6 +120,16 @@ if ($wrappedEdit.Remove($at,1) -cne $table -or $at -le $sentenceStart -or $at -g
 Check-EditorSource $wrappedEdit $tablePath 'Wrapped table source mapping'
 [System.Windows.Forms.SendKeys]::SendWait('^z')
 Check-EditorSource $table $tablePath 'Wrapped table movement edit undo'
+[System.Windows.Forms.SendKeys]::SendWait('^{HOME}{DOWN}{TAB}{DOWN 2}Y^s')
+Wait-ImageCondition { [IO.File]::ReadAllText($tablePath).Contains('Y') } 'Repeated wrapped table movement did not insert'
+$secondEdit=[IO.File]::ReadAllText($tablePath)
+$secondAt=$secondEdit.IndexOf('Y')
+if ($secondEdit.Remove($secondAt,1) -cne $table -or $secondAt -le $at -or $secondAt -ge $sentenceEnd) {
+    throw 'Repeated Down did not progress through the wrapped cell'
+}
+Check-EditorSource $secondEdit $tablePath 'Repeated wrapped table movement'
+[System.Windows.Forms.SendKeys]::SendWait('^z')
+Check-EditorSource $table $tablePath 'Repeated wrapped movement undo'
 [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
 $shot=Capture-Images 'editor-table-narrow.png';$shot.Dispose()
 [void][EditorSmokeWindow]::MoveWindow($mainWindow,0,0,1100,760,$true)
