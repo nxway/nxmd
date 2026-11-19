@@ -10,6 +10,8 @@ The regression fixtures use disposable vaults. To run the Windows GUI checks, bu
 | Use the arrow keys next to a projected list marker or copy a partial formatted span | Hidden prefixes could be skipped, and copy could expand the selected source. Marker navigation now exposes the source, and clipboard and cut share the precise byte range. |
 | Run Cut while another process holds the Windows clipboard | The GPUI write returned without reporting failure. nxmd now retries brief contention and requires a successful Unicode text write before removing the source. The native test holds the clipboard open through the failure and verifies the selection can still be copied and cut. |
 
+A blank line after a nested ordered item can return an indented paragraph to the outer item. The source and layout checks distinguish that case from a tight, lazy continuation of the inner item.
+
 Enter inserts a source newline and continues a list item. Shift+Enter uses a portable two-space break and a hanging continuation inside an item. Within a fence both keys insert a literal newline. Inside a table the keys navigate down and up, preserving the pipe structure. These operations retain the local line-ending convention. The code language label shows a dropdown indicator only when a picker is installed.
 
 ## Local Windows diagnostics

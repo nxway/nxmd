@@ -2986,7 +2986,8 @@ fn shape_document(
     // Active GitHub alert run (`> [!NOTE]` …): set by a marker line, carried
     // while blockquote lines continue, cleared by anything else — so every
     // line of the alert gets the kind's bar color.
-    let mut list_body: Option<(usize, Pixels)> = None;
+    // (marker indentation, body indentation, projected prefix, visual inset)
+    let mut list_bodies: Vec<(usize, usize, usize, Pixels)> = Vec::new();
     let mut alert_run: Option<Hsla> = None;
     let mut y_acc = px(0.);
     for (idx, &line) in lines.iter().enumerate() {
@@ -3479,23 +3480,29 @@ fn shape_document(
         };
         let gutter = match gutter {
             Some((plen, mark @ (LineMark::Check { .. } | LineMark::List { .. }))) => {
-                list_body = Some((plen, mark.inset()));
+                if let Some((body, indent, ..)) = markdown_syntax::list_prefix(line) {
+                    while list_bodies.last().is_some_and(|&(_, parent, _, _)| parent > indent) {
+                        list_bodies.pop();
+                    }
+                    list_bodies.push((indent, body, plen, mark.inset()));
+                }
                 Some((plen, mark))
             }
-            None if !is_code
-                && table.is_none()
-                && widget.is_none()
-                && list_body.is_some_and(|(plen, _)| {
-                    line.as_bytes()
-                        .get(..plen)
-                        .is_some_and(|ws| ws.iter().all(|b| matches!(b, b' ' | b'\t')))
-                }) =>
-            {
-                list_body.map(|(plen, inset)| (plen, LineMark::Continuation(inset)))
+            None if !is_code && table.is_none() && widget.is_none() && !line.trim().is_empty() => {
+                let ws = line.len() - line.trim_start_matches([' ', '\t']).len();
+                let loose = idx > 0 && lines[idx - 1].trim().is_empty();
+                while list_bodies.last().is_some_and(|&(indent, body, _, _)| {
+                    ws == 0 || (ws < body && (loose || ws < indent))
+                }) {
+                    list_bodies.pop();
+                }
+                list_bodies.last().map(|&(_, _, prefix, inset)| {
+                    (prefix.min(ws), LineMark::Continuation(inset))
+                })
             }
             other => {
                 if !line.trim().is_empty() {
-                    list_body = None;
+                    list_bodies.clear();
                 }
                 other
             }

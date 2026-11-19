@@ -12,6 +12,17 @@ $enc=[Text.UTF8Encoding]::new($false)
 $tallPath=Join-Path $qaVault '04 Tall.md'
 $tall="| Exercise name | Repetitions | Notes |`n| --- | --- | --- |`n"+((1..65 | ForEach-Object {"| Row $_ exercise | 10 | Maintain control |"}) -join "`n")
 [IO.File]::WriteAllText($tallPath,$tall,$enc)
+$mixedPath=Join-Path $qaVault '05 Mixed.md'
+$mixedBlocks=@(
+    '# Selection heading',
+    '> Quoted words with **bold** and *italic* text',
+    '- An unordered item',
+    '  - Nested item with `inline code`',
+    '7) An ordered item',
+    '- [x] Completed task',
+    'A closing paragraph.'
+) -join "`n"
+[IO.File]::WriteAllText($mixedPath,$mixedBlocks,$enc)
 Copy-Item (Join-Path $PSScriptRoot '../tests/fixtures/manual-table-lab.md') $tableTest
 $tableHash=(Get-FileHash $tableTest).Hash
 Add-Type -ReferencedAssemblies @('System.Drawing.Common','System.Drawing.Primitives','System.Runtime.InteropServices') -TypeDefinition @'
@@ -46,7 +57,7 @@ public static class SelectionQA {
             int il=x1,ir=-1;
             if(right-left>=12)for(int x=left;x<=right;x++){
                 var c=b.GetPixel(x,y);
-                if(c.R>140 && c.G>140){il=Math.Min(il,x);ir=x;}
+                if(c.R>100 && c.G>105){il=Math.Min(il,x);ir=x;}
             }
             if(ir>=il){
                 if(top<0)top=y;
@@ -203,4 +214,13 @@ Wait-ImageCondition { [System.Windows.Forms.Clipboard]::GetText() -ceq $tall } '
 Start-Sleep -Milliseconds 200
 $shot=Capture-Images 'qa-table-selected.png'
 try {[SelectionQA]::CheckCells($shot,$mainWindow,$rails)} finally {$shot.Dispose()}
+Open-EditorFixture 4 '05 Mixed.md'
+[System.Windows.Forms.SendKeys]::SendWait('^a^c')
+Wait-ImageCondition { [System.Windows.Forms.Clipboard]::GetText() -ceq $mixedBlocks } 'Mixed Markdown selection source mismatch'
+$shot=Capture-Images 'qa-selection-mixed.png'
+try {
+    $mixedBands=[SelectionQA]::Bands($shot,$mainWindow,1100,$true)
+    if ($mixedBands[3] -lt 7) {throw 'Heading, quote, list, nested item, ordinal, task or paragraph has no visible selection'}
+} finally {$shot.Dispose()}
+if ([IO.File]::ReadAllText($mixedPath) -cne $mixedBlocks) {throw 'Selecting mixed Markdown changed source'}
 'PASS: native mouse drag/cut/undo, Unicode clipboard, wrapped highlight geometry, hard breaks, marker editing, QA table border checks across wheel scrolls and widths.' | Tee-Object (Join-Path $resultDir 'stabilization-result.txt')

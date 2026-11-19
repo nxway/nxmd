@@ -54,18 +54,32 @@ pub(crate) fn newline(
         Some(body)
     } else {
         let ws = body.len() - body.trim_start_matches([' ', '\t']).len();
-        source[..start]
-            .lines()
-            .rev()
-            .take_while(|prior| !prior.trim().is_empty())
-            .find_map(|prior| {
-                let prior = prior.strip_prefix(&line[..quote])?;
-                if let Some((prefix, ..)) = list_prefix(prior) {
-                    return Some((ws >= prefix).then_some(prior));
+        let mut owner = None;
+        let mut loose = false;
+        if ws > 0 {
+            for prior in source[..start].lines().rev() {
+                if prior.trim().is_empty() {
+                    loose = true;
+                    continue;
                 }
-                (prior.len() - prior.trim_start_matches([' ', '\t']).len() < ws).then_some(None)
-            })
-            .flatten()
+                let Some(prior) = prior.strip_prefix(&line[..quote]) else {
+                    break;
+                };
+                if let Some((prefix, indent, ..)) = list_prefix(prior) {
+                    if ws >= prefix || (!loose && ws >= indent) {
+                        owner = Some(prior);
+                        break;
+                    }
+                    if indent == 0 {
+                        break;
+                    }
+                    // The line may resume an outer item after a nested list.
+                } else if !prior.starts_with([' ', '\t']) {
+                    break;
+                }
+            }
+        }
+        owner
     };
     if let Some((marker, (prefix, indent, ordered, number))) =
         owner.and_then(|m| Some((m, list_prefix(m)?)))
@@ -78,7 +92,7 @@ pub(crate) fn newline(
         {
             return (start + quote..start + line.len(), String::new());
         }
-        if range.start >= start + quote + prefix {
+        if list_prefix(body).is_none() || range.start >= start + quote + prefix {
             insertion.push_str(&marker[..indent]);
             if hard {
                 insertion.push_str(&" ".repeat(content - indent));
@@ -139,6 +153,17 @@ mod tests {
         out.replace_range(r, &t);
         out
     }
+    #[test]
+    fn loose_nested_item_resumes_its_owning_list() {
+        let source = "7. Outer\n   1. Inner\n\n   continued";
+        assert_eq!(end(source, false), format!("{source}\n8. "));
+        assert_eq!(end(source, true), format!("{source}  \n   "));
+        let tight = "7. Outer\n   1. Inner\n   continued";
+        assert_eq!(end(tight, false), format!("{tight}\n   2. "));
+        let independent = "1. Earlier\n\nUnrelated\n\n   prose";
+        assert_eq!(end(independent, false), format!("{independent}\n"));
+    }
+
     #[test]
     fn source_breaks() {
         assert_eq!(end("hello", false), "hello\n");
