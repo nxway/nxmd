@@ -73,3 +73,6 @@ features = [
     "runtime_shaders",
 ]
 package = "gpui-pre-platform"
+
+[target.'cfg(windows)'.dependencies.clipboard-win]
+version = "5.4.3"

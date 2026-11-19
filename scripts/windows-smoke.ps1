@@ -19,6 +19,9 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class NativeSmoke {
+    [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] public static extern bool OpenClipboard(IntPtr owner);
+    [DllImport("user32.dll")] public static extern bool CloseClipboard();
     public delegate bool EnumProc(IntPtr h, IntPtr p);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -95,11 +98,18 @@ function Assert-EditorText([string]$Expected) {
     # keyboard focus. Copy does not change the document or its undo history.
     # Do not replace clipboard data here: an earlier paste may still be queued.
     if ([System.Windows.Forms.Clipboard]::GetText() -ceq $Expected) { throw 'Copy checkpoint requires distinct initial clipboard contents' }
+    $sequence=[NativeSmoke]::GetClipboardSequenceNumber()
     [System.Windows.Forms.SendKeys]::SendWait('^a')
     [System.Windows.Forms.SendKeys]::SendWait('^c')
     $timer=[Diagnostics.Stopwatch]::StartNew()
     do {
         Assert-Alive
+        # Reading CF_UNICODETEXT holds an exclusive Windows clipboard lock.
+        # Wait for a new publication before opening it to verify the bytes.
+        if ([NativeSmoke]::GetClipboardSequenceNumber() -eq $sequence) {
+            Start-Sleep -Milliseconds 20
+            continue
+        }
         $actual=[System.Windows.Forms.Clipboard]::GetText()
         if ($null -ne $actual -and $actual -ceq $Expected) {
             "Editor input/copy verified after $($timer.ElapsedMilliseconds) ms; foreground=$([NativeSmoke]::GetForegroundWindow()), owner=$mainWindow" | Add-Content (Join-Path $resultDir 'input-sync.txt')
@@ -203,6 +213,7 @@ try {
     [System.Windows.Forms.Clipboard]::SetText('Replacement')
     [System.Windows.Forms.SendKeys]::SendWait('^a')
     [System.Windows.Forms.SendKeys]::SendWait('^v')
+    Wait-SavedText $created 'Replacement' 'Paste before undo'
     [System.Windows.Forms.SendKeys]::SendWait('^z')
     Assert-EditorText $original
     [System.Windows.Forms.SendKeys]::SendWait('^s')

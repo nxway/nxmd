@@ -99,8 +99,11 @@ struct Review {
 impl Review {
     fn new(c: Candidate, w: &mut Window, cx: &mut Context<Self>) -> Self {
         let ed = cx.new(|cx| EditorState::new(w, cx).with_text(c.draft.text.clone()));
-        let sub = cx.subscribe(&ed, |s: &mut Self, _, event, _| {
-            if matches!(event, EditorEvent::Changed) {
+        let sub = cx.subscribe(&ed, |s: &mut Self, _, event, cx| {
+            if matches!(event, EditorEvent::ClipboardWriteFailed) {
+                s.status = "Could not copy the selected text to the clipboard.".into();
+                cx.notify();
+            } else if matches!(event, EditorEvent::Changed) {
                 s.generation += 1;
             }
         });

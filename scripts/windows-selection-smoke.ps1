@@ -122,6 +122,20 @@ try {$edges=[SelectionQA]::Bands($shot,$mainWindow,850,$false)} finally {$shot.D
 [System.Windows.Forms.Clipboard]::SetText('before drag copy')
 [System.Windows.Forms.SendKeys]::SendWait('^c')
 Wait-ImageCondition { [System.Windows.Forms.Clipboard]::GetText() -ceq $plain } 'Mouse selection and visible Unicode endpoints disagree'
+# Force OpenClipboard to fail for the full bounded retry period. Wait for
+# positive acknowledgement that the app attempted Cut while the lock was held.
+if (![NativeSmoke]::OpenClipboard([IntPtr]::Zero)) {throw 'Could not acquire clipboard for contention test'}
+try {
+    [System.Windows.Forms.SendKeys]::SendWait('^x')
+    Wait-ImageCondition {
+        $currentLog=Get-ChildItem (Join-Path $config 'logs') -Filter "*-$($process.Id).log"
+        $null -ne ($currentLog | Select-String -SimpleMatch 'Clipboard write failed; selection retained')
+    } 'Locked clipboard Cut was not acknowledged'
+} finally {[void][NativeSmoke]::CloseClipboard()}
+if ([IO.File]::ReadAllText($geoPath) -cne $geometry) {throw 'Failed Cut modified the file'}
+[System.Windows.Forms.Clipboard]::SetText('after failed cut')
+[System.Windows.Forms.SendKeys]::SendWait('^c')
+Wait-ImageCondition { [System.Windows.Forms.Clipboard]::GetText() -ceq $plain } 'Failed Cut lost selected source or range'
 [System.Windows.Forms.SendKeys]::SendWait('^x')
 Wait-SavedText $geoPath ("`n"+$item) 'Drag cut removed wrong bytes'
 [System.Windows.Forms.SendKeys]::SendWait('^z')

@@ -296,7 +296,11 @@ impl Workspace {
                     e
                 });
                 let subscription = cx.subscribe(&editor, |this, ed, event: &EditorEvent, cx| {
-                    if matches!(event, EditorEvent::Changed) {
+                    if matches!(event, EditorEvent::ClipboardWriteFailed) {
+                        this.status = "Could not copy the selected text to the clipboard.".into();
+                        log::warn!("Clipboard write failed; selection retained");
+                        cx.notify();
+                    } else if matches!(event, EditorEvent::Changed) {
                         if let Some(tab) = this
                             .tabs
                             .iter_mut()

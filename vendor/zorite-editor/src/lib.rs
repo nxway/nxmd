@@ -34,7 +34,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    App, AvailableSpace, BorderStyle, Bounds, ClipboardItem, Context, Corners, CursorStyle, Edges,
+    App, AvailableSpace, BorderStyle, Bounds, Context, Corners, CursorStyle, Edges,
     Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, Font, FontWeight, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, Hsla,
     InspectorElementId, InteractiveElement, IntoElement, KeyBinding, LayoutId, MouseButton,
@@ -489,6 +489,8 @@ impl TableMenuAction {
 /// `cx.subscribe(&editor, …)` — e.g. to re-run spell-check after an edit.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EditorEvent {
+    /// The operating system declined the clipboard write. Cut keeps the source.
+    ClipboardWriteFailed,
     /// The document text changed via a user edit (typing, delete, paste, IME,
     /// applying a suggestion). Not emitted for programmatic `set_text`.
     Changed,
@@ -2900,22 +2902,42 @@ impl EditorState {
     pub fn copy_plain(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
             let text = markdown_syntax::copy_source(&self.content, self.selected_range.clone());
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            Self::write_plain_clipboard(text, cx);
         }
     }
 
     /// Route a Copy/Cut payload through the host's clipboard writer when one
     /// is set (see [`Self::set_clipboard_writer`]), else gpui's plain copy.
-    fn write_clipboard(&self, text: String, cx: &mut Context<Self>) {
-        match &self.clipboard_writer {
-            Some(writer) => writer(&text, cx),
-            None => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+    fn write_clipboard(&self, text: String, cx: &mut Context<Self>) -> bool {
+        if let Some(writer) = &self.clipboard_writer {
+            writer(&text, cx);
+            return true;
         }
+        Self::write_plain_clipboard(text, cx)
+    }
+
+    fn write_plain_clipboard(text: String, cx: &mut Context<Self>) -> bool {
+        #[cfg(windows)]
+        {
+            // GPUI's Windows writer returns () even when OpenClipboard fails.
+            // CF_UNICODETEXT cannot represent embedded NUL. Never delete a
+            // selection whose exact payload could not be transferred.
+            if text.contains('\0') || clipboard_win::set_clipboard_string(&text).is_err() {
+                cx.emit(EditorEvent::ClipboardWriteFailed);
+                return false;
+            }
+        }
+        #[cfg(not(windows))]
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        true
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
-            self.write_clipboard(markdown_syntax::copy_source(&self.content, self.selected_range.clone()), cx);
+        if self.selected_range.is_empty() {
+            return;
+        }
+        let text = markdown_syntax::copy_source(&self.content, self.selected_range.clone());
+        if self.write_clipboard(text, cx) {
             self.replace_text_in_range(None, "", window, cx);
         }
     }
