@@ -20,28 +20,6 @@ function Check-EditorSource([string]$Expected,[string]$Path,[string]$Message) {
     [System.Windows.Forms.SendKeys]::SendWait('^s')
     Wait-SavedText $Path $Expected $Message
 }
-function Open-EditorFixture([int]$Row,[string]$Name) {
-    # The vault callback queues a catalog scan. A persisted vault path can
-    # precede the first frame with explorer row hitboxes. Locate its label
-    # ink before the single click, then verify the exact resulting path.
-    $y=119+30*$Row
-    $point=[NativeSmoke]::ScreenPoint($mainWindow,52,$y)
-    Wait-ImageCondition {
-        $frame=Capture-Images ''
-        try {
-            $ink=0
-            for ($dy=-6;$dy -le 6;$dy+=2) {
-                for ($dx=0;$dx -lt 100;$dx+=2) {
-                    $c=$frame.GetPixel($point[0]+$dx,$point[1]+$dy)
-                    if ($c.R -gt 100 -and $c.G -gt 110 -and $c.B -gt 90) {$ink++}
-                }
-            }
-            $ink -ge 8
-        } finally {$frame.Dispose()}
-    } "Explorer row did not paint before opening $Name"
-    [NativeSmoke]::Click($mainWindow,100,$y)
-    Wait-ImageCondition { (Active-ImagePath) -eq $Name } "Editor fixture did not open: $Name"
-}
 Open-Dialog '^o'; Select-Path $editorVault.FullName $true
 Open-EditorFixture 0 '01 Preview.md'
 Check-EditorSource $preview $previewPath 'Initial Markdown copy/save changed source'

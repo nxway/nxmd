@@ -84,6 +84,47 @@ function Read-SmokeSnapshot([string]$Path, [switch]$Hash) {
         try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
     } finally { $stream.Dispose() }
 }
+function Wait-ImageCondition([scriptblock]$Condition,[string]$Message) {
+    $until=[DateTime]::UtcNow.AddSeconds(20)
+    do { Assert-Alive; if (& $Condition) { return }; Start-Sleep -Milliseconds 100 } until ([DateTime]::UtcNow -gt $until)
+    throw $Message
+}
+function Active-ImagePath {
+    $s=Get-Content (Join-Path $config 'session.json') -Raw | ConvertFrom-Json
+    if ($s.tabs.Count -gt 0) { return $s.tabs[$s.active].Replace('\','/') }
+    return ''
+}
+function Capture-Images([string]$Name) {
+    $bounds=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $bmp=[System.Drawing.Bitmap]::new($bounds.Width,$bounds.Height)
+    $g=[System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($bounds.Location,[System.Drawing.Point]::Empty,$bounds.Size)
+    $g.Dispose()
+    if ($Name) { $bmp.Save((Join-Path $resultDir.FullName $Name)) }
+    return $bmp
+}
+function Open-EditorFixture([int]$Row,[string]$Name) {
+    # The vault callback queues a catalog scan. A persisted vault path can
+    # precede the first frame with explorer row hitboxes. Locate its label
+    # ink before the single click, then verify the exact resulting path.
+    $y=119+30*$Row
+    $point=[NativeSmoke]::ScreenPoint($mainWindow,52,$y)
+    Wait-ImageCondition {
+        $frame=Capture-Images ''
+        try {
+            $ink=0
+            for ($dy=-6;$dy -le 6;$dy+=2) {
+                for ($dx=0;$dx -lt 100;$dx+=2) {
+                    $c=$frame.GetPixel($point[0]+$dx,$point[1]+$dy)
+                    if ($c.R -gt 100 -and $c.G -gt 110 -and $c.B -gt 90) {$ink++}
+                }
+            }
+            $ink -ge 8
+        } finally {$frame.Dispose()}
+    } "Explorer row did not paint before opening $Name"
+    [NativeSmoke]::Click($mainWindow,100,$y)
+    Wait-ImageCondition { (Active-ImagePath) -eq $Name } "Editor fixture did not open: $Name"
+}
 function Wait-SavedInsertion([string]$Path,[string]$Marker) {
     $timer=[Diagnostics.Stopwatch]::StartNew()
     do {
@@ -164,6 +205,8 @@ function Wait-DialogClosed {
             $finished=@($events | Where-Object {$_.Line.EndsWith(' completed')}).Count
             if ($finished -eq $pending) {
                 Wait-SmokeForeground $mainWindow
+                # Allow Windows to finish dismissing shell chrome before the next pointer input.
+                Start-Sleep -Milliseconds 300
                 return
             }
         }
@@ -219,8 +262,9 @@ function Select-Path([string]$path, [bool]$folder=$false) {
             Assert-Alive
             $snapshot=Read-SmokeSnapshot (Join-Path $config 'session.json')
             if ($snapshot) {
-                $activeVault=($snapshot | ConvertFrom-Json).vault
-                if ($activeVault -and [NativeSmoke]::LongPath($activeVault) -ieq $expectedVault) {return}
+                $sessionState=$snapshot | ConvertFrom-Json
+                if ($sessionState.tabs.Count -eq 0 -and $sessionState.vault -and
+                    [NativeSmoke]::LongPath($sessionState.vault) -ieq $expectedVault) {return}
             }
             Start-Sleep -Milliseconds 50
         } while ([DateTime]::UtcNow -lt $until)
@@ -338,8 +382,9 @@ try {
     $longNote=Join-Path $vault 'Writing.md'
     [IO.File]::WriteAllText($longNote,$mixed,[Text.UTF8Encoding]::new($false))
     Open-Dialog '^o'; Select-Path $vault.FullName $true
-    [NativeSmoke]::Click($mainWindow,100,179)
-    Start-Sleep -Milliseconds 500
+    Open-EditorFixture 2 'Writing.md'
+    [System.Windows.Forms.Clipboard]::SetText([Guid]::NewGuid().ToString())
+    Assert-EditorText $mixed
     [System.Windows.Forms.SendKeys]::SendWait('^{END}')
     [System.Windows.Forms.SendKeys]::SendWait('x')
     [System.Windows.Forms.SendKeys]::SendWait('^s')

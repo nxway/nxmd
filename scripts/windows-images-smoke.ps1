@@ -1,24 +1,5 @@
 # Dot-sourced by windows-smoke.ps1; all files live in its temporary test root.
-function Wait-ImageCondition([scriptblock]$Condition,[string]$Message) {
-    $until=[DateTime]::UtcNow.AddSeconds(20)
-    do { Assert-Alive; if (& $Condition) { return }; Start-Sleep -Milliseconds 100 } until ([DateTime]::UtcNow -gt $until)
-    throw $Message
-}
 function Image-Logs { Get-ChildItem (Join-Path $config 'logs') -Filter '*.log' | Get-Content | Out-String }
-function Active-ImagePath {
-    $s=Get-Content (Join-Path $config 'session.json') -Raw | ConvertFrom-Json
-    if ($s.tabs.Count -gt 0) { return $s.tabs[$s.active].Replace('\','/') }
-    return ''
-}
-function Capture-Images([string]$Name) {
-    $bounds=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-    $bmp=[System.Drawing.Bitmap]::new($bounds.Width,$bounds.Height)
-    $g=[System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen($bounds.Location,[System.Drawing.Point]::Empty,$bounds.Size)
-    $g.Dispose()
-    if ($Name) { $bmp.Save((Join-Path $resultDir.FullName $Name)) }
-    return $bmp
-}
 function Color-Pixels([int]$Red,[int]$Green,[int]$Blue) {
     $bmp=Capture-Images ''
     $count=0
@@ -48,9 +29,7 @@ $imageSource="# Images`r`n`r`n![](Pictures/standard.png)`r`n`r`n![[unique.png]]`
 [IO.File]::WriteAllText($imageNote,$imageSource,[Text.UTF8Encoding]::new($true))
 $imageSourceHash=(Get-FileHash $imageNote).Hash
 Open-Dialog '^o'; Select-Path $imagesVault.FullName $true
-Start-Sleep -Milliseconds 700
-[NativeSmoke]::Click($mainWindow,100,179)
-Wait-ImageCondition { (Active-ImagePath) -eq 'ImageNote.md' } 'Image fixture note did not open'
+Open-EditorFixture 2 'ImageNote.md'
 Wait-ImageCondition { (Color-Pixels 240 30 70) -gt 250 -and (Color-Pixels 20 190 230) -gt 150 } 'Standard/Obsidian images did not paint in Live Preview'
 Wait-ImageCondition { (Image-Logs).Contains('Ambiguous image filename: dup.png') -and (Image-Logs).Contains('Image not found inside vault: missing.png') } 'Missing/ambiguous images did not report useful errors'
 if ((Get-FileHash $imageNote).Hash -ne $imageSourceHash) { throw 'Rendering embeds changed BOM/CRLF Markdown bytes' }
