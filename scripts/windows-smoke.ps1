@@ -20,6 +20,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 public static class NativeSmoke {
     [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] public static extern IntPtr GetOpenClipboardWindow();
     [DllImport("user32.dll")] public static extern bool OpenClipboard(IntPtr owner);
     [DllImport("user32.dll")] public static extern bool CloseClipboard();
     public delegate bool EnumProc(IntPtr h, IntPtr p);

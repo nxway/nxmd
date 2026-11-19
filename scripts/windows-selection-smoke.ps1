@@ -135,14 +135,49 @@ try {$edges=[SelectionQA]::Bands($shot,$mainWindow,850,$false)} finally {$shot.D
 Wait-ImageCondition { [System.Windows.Forms.Clipboard]::GetText() -ceq $plain } 'Mouse selection and visible Unicode endpoints disagree'
 # Force OpenClipboard to fail for the full bounded retry period. Wait for
 # positive acknowledgement that the app attempted Cut while the lock was held.
-if (![NativeSmoke]::OpenClipboard([IntPtr]::Zero)) {throw 'Could not acquire clipboard for contention test'}
+$lockReady=Join-Path $root 'clipboard-lock-owner.txt'
+$lockRelease=Join-Path $root 'release-clipboard-lock'
+$holder=Start-Job -ArgumentList $lockReady,$lockRelease -ScriptBlock {
+    param($Ready,$Release)
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class ClipboardHolder {
+    [DllImport("user32.dll")] public static extern bool OpenClipboard(IntPtr owner);
+    [DllImport("user32.dll")] public static extern bool CloseClipboard();
+}
+"@
+    $window=[System.Windows.Forms.NativeWindow]::new()
+    $options=[System.Windows.Forms.CreateParams]::new()
+    $options.Parent=[IntPtr]::new(-3) # HWND_MESSAGE, never activates the desktop
+    $window.CreateHandle($options)
+    try {
+        if (![ClipboardHolder]::OpenClipboard($window.Handle)) {throw 'Could not hold clipboard'}
+        try {
+            [IO.File]::WriteAllText($Ready,$window.Handle.ToInt64().ToString())
+            $end=[DateTime]::UtcNow.AddSeconds(40)
+            while (!(Test-Path $Release) -and [DateTime]::UtcNow -lt $end) {Start-Sleep -Milliseconds 50}
+        } finally {[void][ClipboardHolder]::CloseClipboard()}
+    } finally {$window.DestroyHandle()}
+}
 try {
+    Wait-ImageCondition { (Test-Path $lockReady) -and [NativeSmoke]::GetOpenClipboardWindow().ToInt64().ToString() -ceq [IO.File]::ReadAllText($lockReady) } 'External clipboard holder did not acquire its window lock'
+    if ([NativeSmoke]::OpenClipboard([IntPtr]::Zero)) {
+        [void][NativeSmoke]::CloseClipboard()
+        throw 'Exclusive clipboard contention was not established'
+    }
     [System.Windows.Forms.SendKeys]::SendWait('^x')
     Wait-ImageCondition {
         $currentLog=Get-ChildItem (Join-Path $config 'logs') -Filter "*-$($process.Id).log"
         $null -ne ($currentLog | Select-String -SimpleMatch 'Clipboard write failed; selection retained')
     } 'Locked clipboard Cut was not acknowledged'
-} finally {[void][NativeSmoke]::CloseClipboard()}
+} finally {
+    [IO.File]::WriteAllText($lockRelease,'release')
+    Wait-Job $holder -Timeout 10 | Out-Null
+    Receive-Job $holder -ErrorAction Continue
+    Remove-Job $holder -Force
+}
 if ([IO.File]::ReadAllText($geoPath) -cne $geometry) {throw 'Failed Cut modified the file'}
 [System.Windows.Forms.Clipboard]::SetText('after failed cut')
 [System.Windows.Forms.SendKeys]::SendWait('^c')
