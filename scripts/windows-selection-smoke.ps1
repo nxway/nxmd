@@ -250,7 +250,8 @@ Start-Sleep -Milliseconds 200
 $shot=Capture-Images 'qa-table-selected.png'
 try {[SelectionQA]::CheckCells($shot,$mainWindow,$rails)} finally {$shot.Dispose()}
 Open-EditorFixture 4 '05 Mixed.md'
-[System.Windows.Forms.SendKeys]::SendWait('^a^c')
+[System.Windows.Forms.SendKeys]::SendWait('^a')
+[System.Windows.Forms.SendKeys]::SendWait('^c')
 Wait-ImageCondition { [System.Windows.Forms.Clipboard]::GetText() -ceq $mixedBlocks } 'Mixed Markdown selection source mismatch'
 $shot=Capture-Images 'qa-selection-mixed.png'
 try {
