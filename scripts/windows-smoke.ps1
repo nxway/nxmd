@@ -30,6 +30,13 @@ public static class NativeSmoke {
         if(!ClientToScreen(h,ref p))throw new InvalidOperationException("Missing native client area");
         return new[]{p.X,p.Y};
     }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern uint GetLongPathName(string path,StringBuilder buffer,uint capacity);
+    public static string LongPath(string path) {
+        var buf=new StringBuilder(32768);
+        uint n=GetLongPathName(path,buf,(uint)buf.Capacity);
+        if(n==0 || n>=buf.Capacity)throw new InvalidOperationException("Cannot resolve selected vault");
+        return buf.ToString();
+    }
     public delegate bool EnumProc(IntPtr h, IntPtr p);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -206,11 +213,15 @@ function Select-Path([string]$path, [bool]$folder=$false) {
     }
     Wait-DialogClosed
     if ($folder) {
+        $expectedVault=[NativeSmoke]::LongPath($path)
         $until=[DateTime]::UtcNow.AddSeconds(15)
         do {
             Assert-Alive
             $snapshot=Read-SmokeSnapshot (Join-Path $config 'session.json')
-            if ($snapshot -and ($snapshot | ConvertFrom-Json).vault -ieq $path) {return}
+            if ($snapshot) {
+                $activeVault=($snapshot | ConvertFrom-Json).vault
+                if ($activeVault -and [NativeSmoke]::LongPath($activeVault) -ieq $expectedVault) {return}
+            }
             Start-Sleep -Milliseconds 50
         } while ([DateTime]::UtcNow -lt $until)
         throw "Vault switch did not persist the selected directory: $path"
