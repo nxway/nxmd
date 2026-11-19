@@ -9,6 +9,9 @@ $tableTest=Join-Path $qaVault '03 Table.md'
 $enc=[Text.UTF8Encoding]::new($false)
 [IO.File]::WriteAllText($geoPath,$geometry,$enc)
 [IO.File]::WriteAllText($keysPath,'7) [x] Task',$enc)
+$tallPath=Join-Path $qaVault '04 Tall.md'
+$tall="| Exercise name | Repetitions | Notes |`n| --- | --- | --- |`n"+((1..65 | ForEach-Object {"| Row $_ exercise | 10 | Maintain control |"}) -join "`n")
+[IO.File]::WriteAllText($tallPath,$tall,$enc)
 Copy-Item (Join-Path $PSScriptRoot '../tests/fixtures/manual-table-lab.md') $tableTest
 $tableHash=(Get-FileHash $tableTest).Hash
 Add-Type -ReferencedAssemblies @('System.Drawing.Common','System.Drawing.Primitives','System.Runtime.InteropServices') -TypeDefinition @'
@@ -30,33 +33,65 @@ public static class SelectionQA {
         var o=Origin(h);
         SendMessage(h,0x20a,(IntPtr)(steps*120<<16),Pos(o.X+475,o.Y+210));
     }
-    // Measure actual selection bands. Each group of consecutive tinted scanlines
-    // spans one or more wrapped lines. Test each text baseline separately.
+    static bool Tint(Color c) => Math.Abs(c.R-64)<=3 && Math.Abs(c.G-74)<=3 && Math.Abs(c.B-61)<=3;
+    // Compare the painted selection with the union of glyph ink over a complete
+    // visual line. A scanline through an accent alone cannot locate its text.
     public static int[] Bands(Bitmap b,IntPtr h,int width,bool wrapped){
         var o=Origin(h);int x0=o.X+263, x1=Math.Min(b.Width,o.X+width-12);
-        int previous=-1,count=0,firstL=0,firstR=0,firstY=0;
-        for(int y=Math.Max(0,o.Y+52);y<Math.Min(b.Height,o.Y+480);y++){
-            int l=x1,r=-1;
-            for(int x=x0;x<x1;x++){
+        int count=0,firstL=0,firstR=0,firstY=0;
+        int l=x1,r=-1,inkL=x1,inkR=-1,top=-1,last=-1;
+        for(int y=Math.Max(0,o.Y+52);y<Math.Min(b.Height,o.Y+490);y++){
+            int left=x1,right=-1;
+            for(int x=x0;x<x1;x++)if(Tint(b.GetPixel(x,y))){left=Math.Min(x,left);right=x;}
+            int il=x1,ir=-1;
+            if(right-left>=12)for(int x=left;x<=right;x++){
                 var c=b.GetPixel(x,y);
-                if(Math.Abs(c.R-64)<=3 && Math.Abs(c.G-73)<=3 && Math.Abs(c.B-61)<=3){l=Math.Min(x,l);r=x;}
+                if(c.R>140 && c.G>140){il=Math.Min(il,x);ir=x;}
             }
-            if(r-l<12)continue;
-            // A row centre has glyph ink. Combine +/- 4 scanlines so glyph
-            // ascenders and descenders contribute to the horizontal envelope.
-            int inkL=x1,inkR=-1;
-            for(int x=l;x<=r;x++)for(int j=-4;j<=4;j++){
-                var c=b.GetPixel(x,y+j);
-                if(c.R>140 && c.G>140){inkL=Math.Min(inkL,x);inkR=Math.Max(inkR,x);break;}
+            if(ir>=il){
+                if(top<0)top=y;
+                last=y;l=Math.Min(l,left);r=Math.Max(r,right);inkL=Math.Min(inkL,il);inkR=Math.Max(inkR,ir);
+            }else if(last>=0 && y-last>=4){
+                if(inkL-l>15 || r-inkR>15)throw new Exception("Highlight extends into empty space at y="+top+" selected="+l+".."+r+" ink="+inkL+".."+inkR);
+                if(count++==0){firstL=l;firstR=r+1;firstY=(top+last)/2;}
+                top=last=-1;l=inkL=x1;r=inkR=-1;
             }
-            if(inkR-inkL<12)continue;
-            if(previous>=0 && y-previous<20)continue;
-            if(inkL-l>15 || r-inkR>15)throw new Exception("Highlight extends into empty space at y="+y+" selected="+l+".."+r+" ink="+inkL+".."+inkR);
-            if(count++==0){firstL=l;firstR=r+1;firstY=y;}
-            previous=y;
         }
         if(count<(wrapped?3:1))throw new Exception("Too few native highlight bands: "+count);
         return new[]{firstL,firstR,firstY,count};
+    }
+    public static int[] Rails(Bitmap b,IntPtr h){
+        var o=Origin(h);int[] xs=new int[4];int count=0;
+        for(int x=o.X+278;x<Math.Min(o.X+1090,b.Width);x++){
+            int votes=0;
+            for(int y=o.Y+260;y<o.Y+500;y++){
+                var c=b.GetPixel(x,y);
+                // A hovered row/column uses the brighter green frame.
+                if(c.G>50 && c.G<220 && c.R>40 && c.G>=c.R && c.B<=c.G) votes++;
+            }
+            if(votes>190 && (count==0 || x-xs[count-1]>3)){
+                if(count==4)throw new Exception("Unexpected additional grid boundary at x="+x);
+                xs[count++]=x;
+            }
+        }
+        if(count!=4)throw new Exception("Expected four table boundaries, observed "+count);
+        return xs;
+    }
+    public static void CheckCells(Bitmap b,IntPtr h,int[] rails){
+        var o=Origin(h);int ink=0,excess=0;
+        // Body column 2 contains only "10", left aligned. Its header sets a
+        // wider column. Selection must cover the digits and leave its tail blank.
+        for(int y=o.Y+260;y<o.Y+450;y++){
+            for(int x=rails[1]+8;x<rails[1]+30;x++)if(Tint(b.GetPixel(x,y)))ink++;
+            for(int x=rails[2]-22;x<rails[2]-8;x++)if(Tint(b.GetPixel(x,y)))excess++;
+        }
+        if(ink<200 || excess>0)throw new Exception("Table selection disagrees with numeric cell content: selected="+ink+", blank padding="+excess);
+    }
+    public static int BodyChanges(Bitmap before,Bitmap after,IntPtr h,int[] rails){
+        var o=Origin(h);int changed=0;
+        for(int y=o.Y+260;y<o.Y+490;y+=2)for(int x=rails[0]+6;x<rails[1]-5;x+=2)
+            if(before.GetPixel(x,y)!=after.GetPixel(x,y))changed++;
+        return changed;
     }
     public static int Grid(Bitmap b,IntPtr h,int width){
         var o=Origin(h);int found=0;
@@ -132,4 +167,26 @@ foreach ($width in 850,1100) {
     Open-EditorFixture 2 '03 Table.md'
 }
 if ((Get-FileHash $tableTest).Hash -ne $tableHash){throw 'Scrolling or switching tabs changed QA table source'}
+Open-EditorFixture 3 '04 Tall.md'
+[System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
+Start-Sleep -Milliseconds 400
+$shot=Capture-Images 'qa-tall-grid-before.png'
+try {
+    $rails=[SelectionQA]::Rails($shot,$mainWindow)
+    [SelectionQA]::Wheel($mainWindow,-12)
+    Start-Sleep -Milliseconds 450
+    $after=Capture-Images 'qa-tall-grid-scrolled.png'
+    try {
+        $scrolledRails=[SelectionQA]::Rails($after,$mainWindow)
+        foreach ($i in 0..3) {
+            if ([Math]::Abs($rails[$i]-$scrolledRails[$i]) -gt 2) {throw 'Table frame moved or disappeared while its header was above the viewport'}
+        }
+        if ([SelectionQA]::BodyChanges($shot,$after,$mainWindow,$rails) -lt 150) {throw 'Tall table did not visibly scroll'}
+    } finally {$after.Dispose()}
+} finally {$shot.Dispose()}
+[System.Windows.Forms.SendKeys]::SendWait('^{END}^+{HOME}^c')
+Wait-ImageCondition { [System.Windows.Forms.Clipboard]::GetText() -ceq $tall } 'Table selection source mismatch'
+Start-Sleep -Milliseconds 200
+$shot=Capture-Images 'qa-table-selected.png'
+try {[SelectionQA]::CheckCells($shot,$mainWindow,$rails)} finally {$shot.Dispose()}
 'PASS: native mouse drag/cut/undo, Unicode clipboard, wrapped highlight geometry, hard breaks, marker editing, QA table border checks across wheel scrolls and widths.' | Tee-Object (Join-Path $resultDir 'stabilization-result.txt')

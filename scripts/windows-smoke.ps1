@@ -300,6 +300,7 @@ try {
     if ($probe.ExitCode -eq 0) { throw 'Panic probe unexpectedly succeeded' }
     $panicLogs=Get-ChildItem (Join-Path $config 'logs') -Filter '*.log' | Get-Content | Out-String
     if (!$panicLogs.Contains('nxmd diagnostic self-test') -or !$panicLogs.Contains('PANIC:')) { throw 'Persistent panic log was not written' }
+    . "$PSScriptRoot/windows-log-smoke.ps1"
     . "$PSScriptRoot/windows-recovery-smoke.ps1"
     'PASS: targeted context menus and accepted copy payload, mouse/middle tab close, selection undo/redo, long Markdown edit/undo and failed-save protection; native dialogs opened/cancelled; Open vault, New note and Save as copy accepted; all six dialog callbacks completed; note preserved; clean shutdown; persistent panic log verified.'  | Tee-Object (Join-Path $resultDir 'result.txt')
 } catch {

@@ -2,7 +2,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufRead, Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -69,19 +69,28 @@ fn process_alive(pid: u32) -> bool {
     {
         use windows_sys::Win32::{
             Foundation::CloseHandle,
-            System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
         };
         // Access denied is ambiguous. Keep the log in that case.
         let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
         if h.is_null() {
             return io::Error::last_os_error().raw_os_error() != Some(87);
         }
+        let mut code = 0;
+        let alive = unsafe { GetExitCodeProcess(h, &mut code) } == 0 || code == 259;
         unsafe { CloseHandle(h) };
-        true
+        alive
     }
     #[cfg(not(windows))]
     {
-        Path::new("/proc").join(pid.to_string()).exists() || pid == std::process::id()
+        pid == std::process::id()
+            || !Path::new("/proc/self").is_dir()
+            || Path::new("/proc")
+                .join(pid.to_string())
+                .try_exists()
+                .unwrap_or(true)
     }
 }
 fn prune(dir: &Path, now: SystemTime) -> io::Result<()> {
@@ -291,6 +300,7 @@ unsafe extern "system" fn native_exception(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     fn archived(dir: &Path, at: u64, extra: usize) -> io::Result<PathBuf> {
         let p = dir.join(format!("nxmd-{at}-2147483647.log"));
         let mut f = File::create(&p)?;
@@ -359,4 +369,22 @@ mod tests {
         assert_eq!(fs::read(p)?, b"keep");
         Ok(())
     }
+}
+
+#[cfg(all(windows, test))]
+#[test]
+fn exception_callback_uses_the_preopened_handle() -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    let tmp = tempfile::tempdir()?;
+    let path = tmp.path().join("callback.log");
+    let f = File::create_new(&path)?;
+    let prior = CRASH_HANDLE.swap(f.as_raw_handle(), Ordering::Relaxed);
+    let result = unsafe { native_exception(std::ptr::null_mut()) };
+    CRASH_HANDLE.store(prior, Ordering::Relaxed);
+    assert_eq!(result, 0);
+    assert_eq!(
+        fs::read(path)?,
+        b"UNHANDLED WINDOWS EXCEPTION 0x00000000\r\n"
+    );
+    Ok(())
 }

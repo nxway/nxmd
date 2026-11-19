@@ -357,12 +357,16 @@ impl Element for EditorElement {
         // its result instead of shaping the whole document a second time.
         // Measure may have used a cached band from before a large scroll.
         // Use the actual viewport for prepaint before accepting its row shapes.
-        let vh=f32::from(window.viewport_size().height).max(1.);
-        let top=-f32::from(bounds.top());
-        let band=((((top-vh)/512.).floor()*512.).max(0.),((top+2.*vh)/512.).ceil()*512.);
-        let measured_band=editor.shape_band.replace(Some(band));
+        let vh = f32::from(window.viewport_size().height).max(1.);
+        let top = -f32::from(bounds.top());
+        let band = (
+            (((top - vh) / 512.).floor() * 512.).max(0.),
+            ((top + 2. * vh) / 512.).ceil() * 512.,
+        );
+        let measured_band = editor.shape_band.replace(Some(band));
         let memo = editor.shape_memo.borrow_mut().take().filter(|m| {
-            (measured_band.is_none() || measured_band==Some(band)) && m.wrap_width == wrap_width
+            (measured_band.is_none() || measured_band == Some(band))
+                && m.wrap_width == wrap_width
                 && m.caret_row == caret_row
                 && m.selection == selection
                 && m.font_size == font_size
@@ -660,8 +664,12 @@ impl Element for EditorElement {
                     .code_block_at(fence_row)
                     .map(|(l, _)| l)
                     .unwrap_or_default();
-                let label=if lang.is_empty() {"text"} else {&lang};
-                let lang_text: SharedString = if editor.code_langs.is_empty() {label.to_owned().into()} else {format!("{label} ▾").into()};
+                let label = if lang.is_empty() { "text" } else { &lang };
+                let lang_text: SharedString = if editor.code_langs.is_empty() {
+                    label.to_owned().into()
+                } else {
+                    format!("{label} ▾").into()
+                };
                 let copy_text: SharedString = editor.labels.code_copy.clone();
                 let lang_w = shape(window, &lang_text, st.quote) + px(12.);
                 let copy_w = shape(window, &copy_text, st.quote) + px(12.);
@@ -672,7 +680,8 @@ impl Element for EditorElement {
                     point(right - copy_w - px(4.) - lang_w, y),
                     size(lang_w, chip_h),
                 );
-                let lang_hb = (!editor.code_langs.is_empty()).then(||window.insert_hitbox(lang_bounds, HitboxBehavior::Normal));
+                let lang_hb = (!editor.code_langs.is_empty())
+                    .then(|| window.insert_hitbox(lang_bounds, HitboxBehavior::Normal));
                 let copy_hb = window.insert_hitbox(copy_bounds, HitboxBehavior::Normal);
                 code_chips.push(CodeChip {
                     lang_text,
@@ -1111,73 +1120,113 @@ impl Element for EditorElement {
         // Quads covering source range `s..e`, one per wrap row — the
         // selection's multi-row geometry, shared with the find-match
         // highlights (which paint the same shapes in other colors).
-        let range_quads =
-            |s: usize, e: usize, color: Hsla, window: &mut Window| -> Vec<PaintQuad> {
-                let starts = editor.line_starts();
-                let (s_row, _) = editor.row_col(s);
-                let (e_row, _) = editor.row_col(e);
-                let mut sels = Vec::new();
-                for row in s_row..=e_row {
-                    let Some(line) = wrapped.get(row) else {
-                        continue;
-                    };
-                    let lh = line_heights.get(row).copied().unwrap_or(base_lh);
-                    // A collapsed row (hidden marker/fence line, the table's
-                    // `|---|` separator, a folded body) has no visible text —
-                    // painting its quad would smear a band over its neighbors.
-                    if lh <= px(0.5) {
-                        continue;
-                    }
-                    let top = line_tops[row];
-                    let line_start = starts[row];
-                    let a = s.max(line_start) - line_start;
-                    let b = e.min(editor.line_end(row)) - line_start;
-                    if b <= a { continue; }
-                    if let Some(t) = tables.get(row).and_then(Option::as_ref) {
-                        let left = editor.table_left(t, row, &bounds);
-                        let (vis_l,vis_r)=table_visible_band(bounds.left(),bounds.size.width,t.rtl);
-                        let pad=px(TABLE_CELL_PAD);
-                        for (cell,range) in t.cell_ranges.iter().enumerate() {
-                            let start=a.max(range.start);
-                            let end=b.min(range.end);
-                            if start>=end { continue; }
-                            let Some(content)=t.projected.get(cell) else {continue};
-                            let display=display_col_in(Some(&content.map),start-range.start)..display_col_in(Some(&content.map),end-range.start);
-                            let avail=(cell_span_width(&t.col_widths,t.cells.len(),cell)-pad*2.).max(px(8.));
-                            let Some(wl)=shape_cell(window,content,font_size,Some(avail)) else {continue};
-                            let x=left+col_offset(&t.col_widths,t.cells.len(),cell,t.rtl)+pad;
-                            let mut paint=|k:usize,l:Pixels,r:Pixels|{
-                                let dy=base_lh*k;
-                                let origin=x+cell_alignment_offset(&wl,dy,base_lh,avail,cell_alignment(t,cell));
-                                let lo=(origin+l).max(vis_l);
-                                let hi=(origin+r).min(vis_r);
-                                let y=bounds.top()+top+px(6.)+dy;
-                                if hi>lo {sels.push(fill(Bounds::from_corners(point(lo,y),point(hi,y+base_lh)),color));}
-                            };
-                            if wl.wrap_boundaries().is_empty() && zorite_markdown::syntax::contains_rtl(&content.text) {
-                                for (l,r) in gpui_bidi::shaped::map_of_wrapped(&wl,content.text.len()).rects_for_range(display) {paint(0,px(l),px(r));}
-                            } else {crate::table_layout::selection_bands(&wl,display,paint);}
-                        }
-                        continue;
-                    }
-                    let inset=row_x(row);
-                    let display=disp_col(row,a)..disp_col(row,b);
-                    let mut paint=|k:usize,l:Pixels,r:Pixels|{
-                        let y=lh*k;
-                        sels.push(fill(Bounds::from_corners(to_screen(top,point(inset+l,y)),to_screen(top,point(inset+r,y+lh))),color));
-                    };
-                    if let Some(rtl)=bidi(row) {
-                        for (k,rr) in rtl.rows.iter().enumerate() {
-                            let start=display.start.saturating_sub(rr.start).min(rr.len);
-                            let end=display.end.saturating_sub(rr.start).min(rr.len);
-                            for (l,r) in rr.map.rects_for_range(start..end) {
-                                paint(k,rtl.shift_delta(k)+px(l),rtl.shift_delta(k)+px(r));
-                            }
-                        }
-                    } else {crate::table_layout::selection_bands(line, display, paint);}
+        let range_quads = |s: usize, e: usize, color: Hsla, window: &mut Window| -> Vec<PaintQuad> {
+            let starts = editor.line_starts();
+            let (s_row, _) = editor.row_col(s);
+            let (e_row, _) = editor.row_col(e);
+            let mut sels = Vec::new();
+            for row in s_row..=e_row {
+                let Some(line) = wrapped.get(row) else {
+                    continue;
+                };
+                let lh = line_heights.get(row).copied().unwrap_or(base_lh);
+                // A collapsed row (hidden marker/fence line, the table's
+                // `|---|` separator, a folded body) has no visible text —
+                // painting its quad would smear a band over its neighbors.
+                if lh <= px(0.5) {
+                    continue;
                 }
-                sels
-            };
+                let top = line_tops[row];
+                let screen_y = bounds.top() + top;
+                if screen_y > window.viewport_size().height || screen_y + lh * wrap_rows[row] < px(0.) {
+                    continue;
+                }
+                let line_start = starts[row];
+                let a = s.max(line_start) - line_start;
+                let b = e.min(editor.line_end(row)) - line_start;
+                if b <= a {
+                    continue;
+                }
+                if let Some(t) = tables.get(row).and_then(Option::as_ref) {
+                    let left = editor.table_left(t, row, &bounds);
+                    let (vis_l, vis_r) = table_visible_band(bounds.left(), bounds.size.width, t.rtl);
+                    let pad = px(TABLE_CELL_PAD);
+                    for (cell, range) in t.cell_ranges.iter().enumerate() {
+                        let start = a.max(range.start);
+                        let end = b.min(range.end);
+                        if start >= end {
+                            continue;
+                        }
+                        let Some(content) = t.projected.get(cell) else {
+                            continue;
+                        };
+                        let display = display_col_in(Some(&content.map), start - range.start)
+                            ..display_col_in(Some(&content.map), end - range.start);
+                        let avail = (cell_span_width(&t.col_widths, t.cells.len(), cell) - pad * 2.)
+                            .max(px(8.));
+                        let Some(wl) = shape_cell(window, content, font_size, Some(avail)) else {
+                            continue;
+                        };
+                        let x = left + col_offset(&t.col_widths, t.cells.len(), cell, t.rtl) + pad;
+                        let mut paint = |k: usize, l: Pixels, r: Pixels| {
+                            let dy = base_lh * k;
+                            let origin = x + cell_alignment_offset(
+                                &wl,
+                                dy,
+                                base_lh,
+                                avail,
+                                cell_alignment(t, cell),
+                            );
+                            let lo = (origin + l).max(vis_l);
+                            let hi = (origin + r).min(vis_r);
+                            let y = bounds.top() + top + px(6.) + dy;
+                            if hi > lo {
+                                sels.push(fill(
+                                    Bounds::from_corners(point(lo, y), point(hi, y + base_lh)),
+                                    color,
+                                ));
+                            }
+                        };
+                        if wl.wrap_boundaries().is_empty()
+                            && zorite_markdown::syntax::contains_rtl(&content.text)
+                        {
+                            for (l, r) in gpui_bidi::shaped::map_of_wrapped(&wl, content.text.len())
+                                .rects_for_range(display)
+                            {
+                                paint(0, px(l), px(r));
+                            }
+                        } else {
+                            crate::table_layout::selection_bands(&wl, display, paint);
+                        }
+                    }
+                    continue;
+                }
+                let inset = row_x(row);
+                let display = disp_col(row, a)..disp_col(row, b);
+                let mut paint = |k: usize, l: Pixels, r: Pixels| {
+                    let y = lh * k;
+                    sels.push(fill(
+                        Bounds::from_corners(
+                            to_screen(top, point(inset + l, y)),
+                            to_screen(top, point(inset + r, y + lh)),
+                        ),
+                        color,
+                    ));
+                };
+                if let Some(rtl) = bidi(row) {
+                    for (k, rr) in rtl.rows.iter().enumerate() {
+                        let start = display.start.saturating_sub(rr.start).min(rr.len);
+                        let end = display.end.saturating_sub(rr.start).min(rr.len);
+                        for (l, r) in rr.map.rects_for_range(start..end) {
+                            paint(k, rtl.shift_delta(k) + px(l), rtl.shift_delta(k) + px(r));
+                        }
+                    }
+                } else {
+                    crate::table_layout::selection_bands(line, display, paint);
+                }
+            }
+            sels
+        };
 
         // Find-match highlights (host-set): the reader's browser-style find
         // colors — soft yellow everywhere, stronger orange on the active
@@ -1477,6 +1526,51 @@ impl Element for EditorElement {
                 }
                 _ => outline.clear(),
             }
+            // The header owns a frame around the entire table. Cull that frame
+            // by its own extent before deciding whether to skip the header text.
+            if let Some(t) = prepaint.tables[i]
+                .as_ref()
+                .filter(|t| t.is_header && matches!(t.style, markdown_syntax::TableStyle::Grid))
+            {
+                let mut total_h = px(0.);
+                for j in i..prepaint.tables.len() {
+                    match prepaint.tables[j].as_ref() {
+                        Some(tr) => {
+                            total_h += prepaint.line_heights[j];
+                            if tr.is_last {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                if origin.y + total_h >= px(0.) && origin.y <= viewport_h {
+                    let g = px(TABLE_GUTTER);
+                    let avail = bounds.size.width - g * 2.;
+                    let (tleft, _) = table_visible_band(origin.x, bounds.size.width, t.rtl);
+                    let content_left = self.editor.read(cx).table_left(t, i, &bounds);
+                    let table_w: Pixels = t.col_widths.iter().copied().sum();
+                    let border_mask = gpui::ContentMask {
+                        bounds: Bounds::new(
+                            point(tleft, origin.y - g),
+                            size(avail, total_h + g * 2.),
+                        ),
+                    };
+                    window.with_content_mask(Some(border_mask), |window| {
+                        window.paint_quad(PaintQuad {
+                            bounds: Bounds::new(
+                                point(content_left, origin.y),
+                                size(table_w, total_h),
+                            ),
+                            corner_radii: Corners::all(px(6.)),
+                            background: hsla(0., 0., 0., 0.).into(),
+                            border_widths: Edges::all(px(1.)),
+                            border_color: t.border,
+                            border_style: BorderStyle::Solid,
+                        });
+                    });
+                }
+            }
             // Windowed paint: a line fully outside the window's viewport paints
             // nothing. The guide bookkeeping above still runs — a visible list
             // row's ancestor guides can start above the viewport. The slack
@@ -1763,7 +1857,6 @@ impl Element for EditorElement {
             if let Some(t) = prepaint.tables.get(i).and_then(Option::as_ref) {
                 // A wide table keeps natural columns, scrolled by sx and
                 // clipped to the viewport — rows paint shifted under a mask.
-                let table_w: Pixels = t.col_widths.iter().copied().sum();
                 let avail = bounds.size.width - px(TABLE_GUTTER * 2.);
                 // The clip band, on the side this table's gutter ISN'T (#66).
                 let (tleft, _) = table_visible_band(origin.x, bounds.size.width, t.rtl);
@@ -1772,44 +1865,6 @@ impl Element for EditorElement {
                 let mask = gpui::ContentMask {
                     bounds: Bounds::new(point(tleft, origin.y - g), size(avail, *lh + g * 2.)),
                 };
-                // The header row paints the whole table's rounded outer border
-                // (one box around all its rows, matching the reading view) — for
-                // the Grid style only; the others are box-less. It spans the
-                // WHOLE table's height, so it gets its own full-height mask
-                // (the per-row mask below would clip it to the header band).
-                if t.is_header && matches!(t.style, markdown_syntax::TableStyle::Grid) {
-                    let mut total_h = px(0.);
-                    for j in i..prepaint.tables.len() {
-                        match prepaint.tables[j].as_ref() {
-                            Some(tr) => {
-                                total_h += prepaint.line_heights[j];
-                                if tr.is_last {
-                                    break;
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                    let border_mask = gpui::ContentMask {
-                        bounds: Bounds::new(
-                            point(tleft, origin.y - g),
-                            size(avail, total_h + g * 2.),
-                        ),
-                    };
-                    window.with_content_mask(Some(border_mask), |window| {
-                        window.paint_quad(PaintQuad {
-                            bounds: Bounds::new(
-                                point(content_left, origin.y),
-                                size(table_w, total_h),
-                            ),
-                            corner_radii: Corners::all(px(6.)),
-                            background: hsla(0., 0., 0., 0.).into(),
-                            border_widths: Edges::all(px(1.)),
-                            border_color: t.border,
-                            border_style: BorderStyle::Solid,
-                        });
-                    });
-                }
                 window.with_content_mask(Some(mask), |window| {
                     paint_table_row(
                         t,
@@ -2225,7 +2280,7 @@ impl Element for EditorElement {
                 (chip.lang_bounds, &chip.lang_text, chip.lang_hb.as_ref()),
                 (chip.copy_bounds, &chip.copy_text, Some(&chip.copy_hb)),
             ] {
-                let hovered = hb.is_some_and(|h|h.is_hovered(window));
+                let hovered = hb.is_some_and(|h| h.is_hovered(window));
                 window.paint_quad(PaintQuad {
                     bounds: bounds_,
                     corner_radii: Corners::all(px(4.)),
@@ -2257,7 +2312,9 @@ impl Element for EditorElement {
                     window,
                     cx,
                 );
-                if let Some(hb)=hb{window.set_cursor_style(CursorStyle::PointingHand, hb);}
+                if let Some(hb) = hb {
+                    window.set_cursor_style(CursorStyle::PointingHand, hb);
+                }
             }
             code_chip_rects.push(CodeChipHit {
                 lang: chip.lang_bounds,
@@ -2929,7 +2986,7 @@ fn shape_document(
     // Active GitHub alert run (`> [!NOTE]` …): set by a marker line, carried
     // while blockquote lines continue, cleared by anything else — so every
     // line of the alert gets the kind's bar color.
-    let mut list_body: Option<(usize,Pixels)> = None;
+    let mut list_body: Option<(usize, Pixels)> = None;
     let mut alert_run: Option<Hsla> = None;
     let mut y_acc = px(0.);
     for (idx, &line) in lines.iter().enumerate() {
@@ -3420,15 +3477,28 @@ fn shape_document(
         } else {
             None
         };
-        let gutter=match gutter {
-            Some((plen,mark @ (LineMark::Check{..}|LineMark::List{..})))=>{
-                list_body=Some((plen,mark.inset()));
-                Some((plen,mark))
+        let gutter = match gutter {
+            Some((plen, mark @ (LineMark::Check { .. } | LineMark::List { .. }))) => {
+                list_body = Some((plen, mark.inset()));
+                Some((plen, mark))
             }
-            None if !is_code && table.is_none() && widget.is_none() && list_body.is_some_and(|(plen,_)|line.as_bytes().get(..plen).is_some_and(|ws|ws.iter().all(|b| matches!(b,b' '|b'\t'))))=>{
-                list_body.map(|(plen,inset)|(plen,LineMark::Continuation(inset)))
+            None if !is_code
+                && table.is_none()
+                && widget.is_none()
+                && list_body.is_some_and(|(plen, _)| {
+                    line.as_bytes()
+                        .get(..plen)
+                        .is_some_and(|ws| ws.iter().all(|b| matches!(b, b' ' | b'\t')))
+                }) =>
+            {
+                list_body.map(|(plen, inset)| (plen, LineMark::Continuation(inset)))
             }
-            other=>{if !line.trim().is_empty(){list_body=None;}other}
+            other => {
+                if !line.trim().is_empty() {
+                    list_body = None;
+                }
+                other
+            }
         };
         let caret_here = caret_col.is_some();
         // A thematic break (`---`) renders as a full-width divider, but only while
@@ -3447,7 +3517,13 @@ fn shape_document(
         let caret_in_prefix = gutter
             .as_ref()
             .zip(caret_col)
-            .is_some_and(|(&(plen, _), col)| col < plen);
+            .is_some_and(|(&(plen, _), col)| col < plen)
+            || gutter.is_some_and(|(plen, _)| {
+                sel_touches
+                    && [selection.0, selection.1]
+                        .into_iter()
+                        .any(|p| line_start < p && p < line_start + plen)
+            });
         // A selection across a gutter line keeps the mark too: the whole-line
         // raw reveal made list rows renumber (source digits) and jump to raw
         // indent mid-select. The BODY still reveals its inline markers (see

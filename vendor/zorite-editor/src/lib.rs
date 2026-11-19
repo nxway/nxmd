@@ -2412,18 +2412,22 @@ impl EditorState {
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
-        self.insert_break(false,window,cx);
+        self.insert_break(false, window, cx);
     }
-    fn hard_break(&mut self,_:&HardBreak,window:&mut Window,cx:&mut Context<Self>){
-        self.insert_break(true,window,cx);
+    fn hard_break(&mut self, _: &HardBreak, window: &mut Window, cx: &mut Context<Self>) {
+        self.insert_break(true, window, cx);
     }
-    fn insert_break(&mut self,hard:bool,window:&mut Window,cx:&mut Context<Self>){
+    fn insert_break(&mut self, hard: bool, window: &mut Window, cx: &mut Context<Self>) {
         // Inside a table, a raw newline would split the row's `| … |` markup.
         // Enter instead moves to the cell directly below (next row, same column,
         // spreadsheet-style); from the last row it exits onto a fresh line below
         // the table.
-        if self.caret_in_table() {
-            if let Some(off) = self.table_move_vertical(1)
+        let (first, _) = self.row_col(self.selected_range.start);
+        let (last, _) = self.row_col(self.selected_range.end);
+        if self.caret_in_table()
+            && self.table_rows.get(first..=last).is_some_and(|rows| rows.iter().all(Option::is_some))
+        {
+            if let Some(off) = self.table_move_vertical(if hard { -1 } else { 1 })
                 && self
                     .table_rows
                     .get(self.row_col(off).0)
@@ -2431,6 +2435,9 @@ impl EditorState {
                     .is_some_and(|t| !t.is_separator)
             {
                 self.move_to(off, cx);
+                return;
+            }
+            if hard {
                 return;
             }
             let (row, _) = self.row_col(self.cursor_offset());
@@ -2445,8 +2452,8 @@ impl EditorState {
             }
             let starts = self.line_starts();
             let end = starts.get(last + 1).map_or(self.content.len(), |&s| s - 1);
-            self.selected_range = end..end;
-            self.replace_text_in_range(None, "\n", window, cx);
+            let (range, eol) = line_edit::newline(&self.content, end..end, false, false);
+            self.replace_text_in_range(Some(self.range_to_utf16(&range)), &eol, window, cx);
             return;
         }
         // Inside a property panel a raw newline would split a `key:: value`
@@ -2459,10 +2466,15 @@ impl EditorState {
                 return;
             }
         }
-        let (range,text)=line_edit::newline(&self.content,self.selected_range.clone(),hard,self.markdown_style.is_some());
+        let (range, text) = line_edit::newline(
+            &self.content,
+            self.selected_range.clone(),
+            hard,
+            self.markdown_style.is_some(),
+        );
         // Pass an explicit replacement range so undo remembers the user's
         // original selection, including a collapsed caret on an empty item.
-        let range=self.range_to_utf16(&range);
+        let range = self.range_to_utf16(&range);
         self.replace_text_in_range(Some(range), &text, window, cx);
     }
 
@@ -2877,7 +2889,7 @@ impl EditorState {
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
-            let text = self.content[self.selected_range.clone()].to_owned();
+            let text = markdown_syntax::copy_source(&self.content, self.selected_range.clone());
             self.write_clipboard(text, cx);
         }
     }
@@ -2887,7 +2899,7 @@ impl EditorState {
     /// menu's "Copy as Markdown"). Same exact-source selection rules as `copy`.
     pub fn copy_plain(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
-            let text = self.content[self.selected_range.clone()].to_owned();
+            let text = markdown_syntax::copy_source(&self.content, self.selected_range.clone());
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -2903,7 +2915,7 @@ impl EditorState {
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
-            self.write_clipboard(self.content[self.selected_range.clone()].to_string(), cx);
+            self.write_clipboard(markdown_syntax::copy_source(&self.content, self.selected_range.clone()), cx);
             self.replace_text_in_range(None, "", window, cx);
         }
     }
@@ -4888,6 +4900,17 @@ impl EditorState {
         if self.widget_rows.get(row).copied().unwrap_or(false) {
             return self.line_starts()[row];
         }
+        // A click on a painted list marker enters its actual source. Clicks
+        // on later wraps still target the body. Checkboxes retain their toggle.
+        if rel.x < self.row_origin_x(row)
+            && rel.y >= self.line_tops[row]
+            && rel.y < self.line_tops[row] + self.line_h(row)
+            && self.bidi_map(row).is_none()
+            && let Some((prefix, indent, ..)) = markdown_syntax::list_prefix(self.line_str(row))
+            && self.offset_maps.get(row).and_then(Option::as_ref).is_some_and(|map| map.first() == Some(&prefix))
+        {
+            return self.line_starts()[row] + indent;
+        }
         let x = (rel.x - self.row_origin_x(row)).max(px(0.));
         let line_rel = point(x, rel.y - self.line_tops[row]);
         let col = line_index_at(
@@ -4992,8 +5015,10 @@ impl EditorState {
             return self.previous_boundary(offset);
         }
         let (row0, col0) = self.row_col(offset);
-        let prefix=self.hidden_prefix_len(row0);
-        if prefix>0 && col0 <= prefix { return self.previous_boundary(offset); }
+        let prefix = self.hidden_prefix_len(row0);
+        if prefix > 0 && col0 <= prefix {
+            return self.previous_boundary(offset);
+        }
         let d0 = self.display_col(row0, col0);
         let mut off = self.previous_boundary(offset);
         loop {
@@ -5017,8 +5042,10 @@ impl EditorState {
             return self.next_boundary(offset);
         }
         let (row0, col0) = self.row_col(offset);
-        let prefix=self.hidden_prefix_len(row0);
-        if prefix>0 && col0 < prefix { return self.next_boundary(offset); }
+        let prefix = self.hidden_prefix_len(row0);
+        if prefix > 0 && col0 < prefix {
+            return self.next_boundary(offset);
+        }
         let d0 = self.display_col(row0, col0);
         let mut off = self.next_boundary(offset);
         loop {
@@ -6504,7 +6531,7 @@ impl LineMark {
     /// Horizontal inset (px) applied to the body text + caret for this mark.
     fn inset(self) -> Pixels {
         match self {
-            LineMark::Continuation(inset)=>inset,
+            LineMark::Continuation(inset) => inset,
             LineMark::Quote { .. } => px(QUOTE_INSET),
             LineMark::Alert { text_inset, .. } => text_inset,
             LineMark::List { text_inset, .. } | LineMark::Check { text_inset, .. } => text_inset,
@@ -6695,20 +6722,6 @@ impl RtlRow {
     /// an offset at the very end of the line.
     fn row_of(&self, dcol: usize) -> (usize, usize) {
         row_of_spans(self.rows.iter().map(|r| (r.start, r.len)), dcol)
-    }
-
-    /// A row's horizontal extent (left, right) relative to the FIRST row's
-    /// origin — the coordinate space callers already work in, since they add
-    /// `row_origin_x`. Used to band a selection across a row: an RTL row does
-    /// not span the content width, so "the whole row" is this, not 0..width.
-    pub(crate) fn row_extent(&self, row: usize) -> (Pixels, Pixels) {
-        let d = self.shift_delta(row);
-        (d, d + self.rows.get(row).map_or(px(0.), |r| r.width))
-    }
-
-    /// How many visual rows this line broke into.
-    pub(crate) fn row_count(&self) -> usize {
-        self.rows.len()
     }
 
     /// A row's shift relative to the FIRST row's. Callers already add
