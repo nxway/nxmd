@@ -156,6 +156,8 @@ function Select-Path([string]$path, [bool]$folder=$false) {
     }
     Wait-DialogClosed
 }
+$previousDiagnostics=$env:NXMD_DIAGNOSTICS
+$env:NXMD_DIAGNOSTICS='verbose'
 $originalLocalAppData = $env:LOCALAPPDATA
 $process = $null
 try {
@@ -276,6 +278,7 @@ try {
     Wait-SavedText $longNote $mixed 'Long Markdown undo did not preserve source'
     . "$PSScriptRoot/windows-images-smoke.ps1"
     . "$PSScriptRoot/windows-editor-smoke.ps1"
+    . "$PSScriptRoot/windows-selection-smoke.ps1"
     # Save a screenshot of the actual native UI for visual review.
     $bounds=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
     $bitmap=[System.Drawing.Bitmap]::new($bounds.Width,$bounds.Height)
@@ -316,6 +319,7 @@ try {
     "FAIL: $($_.Exception.Message)" | Tee-Object (Join-Path $resultDir 'result.txt')
     throw
 } finally {
+    $env:NXMD_DIAGNOSTICS=$previousDiagnostics
     $env:LOCALAPPDATA = $originalLocalAppData
     if ($process -and !$process.HasExited) { Stop-Process -Id $process.Id -Force }
     if (Test-Path (Join-Path $config 'logs')) { Copy-Item (Join-Path $config 'logs') (Join-Path $resultDir 'logs') -Recurse -Force }

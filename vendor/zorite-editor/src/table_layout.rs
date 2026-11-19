@@ -29,6 +29,39 @@ pub(crate) fn column_widths(
         .map(|(&m, p)| m + (p - m) * share)
         .collect()
 }
+/// Visit the selected horizontal interval on each visual row. Wrap boundaries
+/// belong to the upstream row for an end and the downstream row for a start.
+pub(crate) fn selection_bands(
+    line: &gpui::WrappedLineLayout,
+    range: std::ops::Range<usize>,
+    mut emit: impl FnMut(usize, gpui::Pixels, gpui::Pixels),
+) {
+    let layout = &line.unwrapped_layout;
+    let mut start = 0;
+    for (row, end) in line
+        .wrap_boundaries
+        .iter()
+        .map(|b| layout.runs[b.run_ix].glyphs[b.glyph_ix].index)
+        .chain(std::iter::once(layout.len))
+        .enumerate()
+    {
+        let a = range.start.max(start);
+        let b = range.end.min(end);
+        if a < b {
+            let origin = layout.x_for_index(start);
+            let x0 = layout.x_for_index(a) - origin;
+            let x1 = layout.x_for_index(b) - origin;
+            if x1 > x0 {
+                emit(row, x0, x1);
+            }
+        }
+        if end >= range.end {
+            break;
+        }
+        start = end;
+    }
+}
+
 /// Caret geometry for table cells, with downstream affinity at a soft wrap.
 pub(crate) fn cell_position(
     line: &gpui::WrappedLineLayout,
@@ -84,6 +117,18 @@ mod tests {
             ]
             .into(),
         };
+        let mut bands = Vec::new();
+        selection_bands(&line, 1..5, |row, left, right| {
+            bands.push((row, left, right))
+        });
+        assert_eq!(
+            bands,
+            [
+                (0, px(10.), px(20.)),
+                (1, px(0.), px(20.)),
+                (2, px(0.), px(10.))
+            ]
+        );
         for row in 0..3 {
             let target = point(px(0.), px(row as f32 * 24. + 1.));
             let source = line.closest_index_for_position(target, px(24.)).unwrap();

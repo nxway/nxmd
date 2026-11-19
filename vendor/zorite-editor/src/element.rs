@@ -355,8 +355,14 @@ impl Element for EditorElement {
         let sf = window.scale_factor();
         // The measure pass already shaped these exact inputs this frame — use
         // its result instead of shaping the whole document a second time.
+        // Measure may have used a cached band from before a large scroll.
+        // Use the actual viewport for prepaint before accepting its row shapes.
+        let vh=f32::from(window.viewport_size().height).max(1.);
+        let top=-f32::from(bounds.top());
+        let band=((((top-vh)/512.).floor()*512.).max(0.),((top+2.*vh)/512.).ceil()*512.);
+        let measured_band=editor.shape_band.replace(Some(band));
         let memo = editor.shape_memo.borrow_mut().take().filter(|m| {
-            m.wrap_width == wrap_width
+            (measured_band.is_none() || measured_band==Some(band)) && m.wrap_width == wrap_width
                 && m.caret_row == caret_row
                 && m.selection == selection
                 && m.font_size == font_size
@@ -434,20 +440,6 @@ impl Element for EditorElement {
                 &editor.folded_headings,
             )
         };
-
-        // Publish NEXT frame's shaping window: the viewport band in
-        // element-local y with a viewport of margin each side, quantized so
-        // the band (and with it the measure→prepaint memo) stays stable
-        // across small scrolls. Read back one frame stale — both passes of a
-        // frame always shape with the same band.
-        {
-            let vh = f32::from(window.viewport_size().height).max(1.);
-            let top = -f32::from(bounds.origin.y);
-            let q = 512.0;
-            let lo = (((top - vh) / q).floor() * q).max(0.);
-            let hi = ((top + 2. * vh) / q).ceil() * q;
-            editor.shape_band.set(Some((lo, hi)));
-        }
 
         // Top offset of each logical line (running sum of variable wrap heights),
         // reserving a gap above/below each code block so its padded box has its
@@ -668,11 +660,8 @@ impl Element for EditorElement {
                     .code_block_at(fence_row)
                     .map(|(l, _)| l)
                     .unwrap_or_default();
-                let lang_text: SharedString = if lang.is_empty() {
-                    "text ▾".into()
-                } else {
-                    format!("{lang} ▾").into()
-                };
+                let label=if lang.is_empty() {"text"} else {&lang};
+                let lang_text: SharedString = if editor.code_langs.is_empty() {label.to_owned().into()} else {format!("{label} ▾").into()};
                 let copy_text: SharedString = editor.labels.code_copy.clone();
                 let lang_w = shape(window, &lang_text, st.quote) + px(12.);
                 let copy_w = shape(window, &copy_text, st.quote) + px(12.);
@@ -683,7 +672,7 @@ impl Element for EditorElement {
                     point(right - copy_w - px(4.) - lang_w, y),
                     size(lang_w, chip_h),
                 );
-                let lang_hb = window.insert_hitbox(lang_bounds, HitboxBehavior::Normal);
+                let lang_hb = (!editor.code_langs.is_empty()).then(||window.insert_hitbox(lang_bounds, HitboxBehavior::Normal));
                 let copy_hb = window.insert_hitbox(copy_bounds, HitboxBehavior::Normal);
                 code_chips.push(CodeChip {
                     lang_text,
@@ -1127,7 +1116,6 @@ impl Element for EditorElement {
                 let starts = editor.line_starts();
                 let (s_row, _) = editor.row_col(s);
                 let (e_row, _) = editor.row_col(e);
-                let right = bounds.size.width;
                 let mut sels = Vec::new();
                 for row in s_row..=e_row {
                     let Some(line) = wrapped.get(row) else {
@@ -1144,166 +1132,49 @@ impl Element for EditorElement {
                     let line_start = starts[row];
                     let a = s.max(line_start) - line_start;
                     let b = e.min(editor.line_end(row)) - line_start;
-                    // Table row: highlight between the cell positions of the selection
-                    // ends (not raw-source geometry).
+                    if b <= a { continue; }
                     if let Some(t) = tables.get(row).and_then(Option::as_ref) {
-                        let table_w: Pixels = t.col_widths.iter().copied().sum();
-                        let tleft = editor.table_left(t, row, &bounds);
-                        // Endpoint x's: inside a cell, the exact caret x; at
-                        // or past the row's cell span — or in an empty cell
-                        // the shaper can't position — the table's edge, so
-                        // vacant trailing cells highlight too.
-                        let first_start = t.cell_ranges.first().map_or(0, |r| r.start);
-                        let last_end = t.cell_ranges.last().map_or(0, |r| r.end);
-                        // Clamp to the table's visible band — a wide
-                        // (scrolling) table's cells extend past the
-                        // viewport, but its highlight must not.
-                        let (vis_l, vis_r) =
-                            table_visible_band(bounds.left(), bounds.size.width, t.rtl);
-                        let mut band = |lo: Pixels, hi: Pixels, y: Pixels, h: Pixels| {
-                            let (lo, hi) = (lo.max(vis_l), hi.min(vis_r));
-                            if hi > lo {
-                                sels.push(fill(
-                                    Bounds::from_corners(point(lo, y), point(hi, y + h)),
-                                    color,
-                                ));
-                            }
-                        };
-                        let pa = (a > first_start && a < last_end)
-                            .then(|| table_caret_pos(t, a, tleft, &font, font_size, window))
-                            .flatten();
-                        let pb = (b > first_start && b < last_end)
-                            .then(|| table_caret_pos(t, b, tleft, &font, font_size, window))
-                            .flatten();
-                        match (pa, pb) {
-                            // Both ends inside the SAME (possibly wrapped)
-                            // cell: per-wrap-row bands within that cell —
-                            // one full-height band would smear the whole row.
-                            (Some((xa, ya, ca, _)), Some((xb, yb, cb, _))) if ca == cb => {
-                                let pad = px(TABLE_CELL_PAD);
-                                let cell_x =
-                                    tleft + col_offset(&t.col_widths, t.cells.len(), ca, t.rtl);
-                                let cw = cell_span_width(&t.col_widths, t.cells.len(), ca);
-                                let (cl, cr) = (cell_x + pad, cell_x + cw - pad);
-                                let y0 = bounds.top() + top + px(6.);
-                                if ya == yb {
-                                    band(
-                                        xa.min(xb),
-                                        xa.max(xb).max(xa.min(xb) + px(2.)),
-                                        y0 + ya,
-                                        base_lh,
-                                    );
-                                } else {
-                                    band(xa, cr, y0 + ya, base_lh);
-                                    let mut y = ya + base_lh;
-                                    while y < yb {
-                                        band(cl, cr, y0 + y, base_lh);
-                                        y += base_lh;
-                                    }
-                                    band(cl, xb, y0 + yb, base_lh);
-                                }
-                            }
-                            // Anything else: one full-height band between the
-                            // endpoint x's (row edges for out-of-span ends).
-                            _ => {
-                                let xa = if a <= first_start {
-                                    tleft
-                                } else {
-                                    pa.map_or(tleft, |(x, ..)| x)
-                                };
-                                let xb = if b >= last_end {
-                                    tleft + table_w
-                                } else {
-                                    pb.map_or(tleft + table_w, |(x, ..)| x)
-                                };
-                                band(xa.min(xb), xa.max(xb), bounds.top() + top, lh);
-                            }
+                        let left = editor.table_left(t, row, &bounds);
+                        let (vis_l,vis_r)=table_visible_band(bounds.left(),bounds.size.width,t.rtl);
+                        let pad=px(TABLE_CELL_PAD);
+                        for (cell,range) in t.cell_ranges.iter().enumerate() {
+                            let start=a.max(range.start);
+                            let end=b.min(range.end);
+                            if start>=end { continue; }
+                            let Some(content)=t.projected.get(cell) else {continue};
+                            let display=display_col_in(Some(&content.map),start-range.start)..display_col_in(Some(&content.map),end-range.start);
+                            let avail=(cell_span_width(&t.col_widths,t.cells.len(),cell)-pad*2.).max(px(8.));
+                            let Some(wl)=shape_cell(window,content,font_size,Some(avail)) else {continue};
+                            let x=left+col_offset(&t.col_widths,t.cells.len(),cell,t.rtl)+pad;
+                            let mut paint=|k:usize,l:Pixels,r:Pixels|{
+                                let dy=base_lh*k;
+                                let origin=x+cell_alignment_offset(&wl,dy,base_lh,avail,cell_alignment(t,cell));
+                                let lo=(origin+l).max(vis_l);
+                                let hi=(origin+r).min(vis_r);
+                                let y=bounds.top()+top+px(6.)+dy;
+                                if hi>lo {sels.push(fill(Bounds::from_corners(point(lo,y),point(hi,y+base_lh)),color));}
+                            };
+                            if wl.wrap_boundaries().is_empty() && zorite_markdown::syntax::contains_rtl(&content.text) {
+                                for (l,r) in gpui_bidi::shaped::map_of_wrapped(&wl,content.text.len()).rects_for_range(display) {paint(0,px(l),px(r));}
+                            } else {crate::table_layout::selection_bands(&wl,display,paint);}
                         }
                         continue;
                     }
-                    let inset = row_x(row);
-                    let pa = line_pos(line, bidi(row), disp_col(row, a), lh).unwrap_or_default();
-                    let pb = line_pos(line, bidi(row), disp_col(row, b), lh).unwrap_or_default();
-                    let pa = point(pa.x + inset, pa.y);
-                    let pb = point(pb.x + inset, pb.y);
-                    if pa.y == pb.y {
-                        // On an RTL row the range's END sits to the LEFT of its
-                        // start, so order the corners by x. One rect per row is
-                        // still all this paints: a selection spanning a
-                        // direction change is visually split (see
-                        // `VisualMap::rects_for_range`) and needs N — a
-                        // follow-up.
-                        let (x0, x1) = (pa.x.min(pb.x), pa.x.max(pb.x));
-                        sels.push(fill(
-                            Bounds::from_corners(
-                                to_screen(top, point(x0, pa.y)),
-                                to_screen(top, point(x1.max(x0 + px(2.)), pb.y + lh)),
-                            ),
-                            color,
-                        ));
-                    } else if let Some(r) = bidi(row) {
-                        // RTL, spanning wrap rows: the selection runs the other
-                        // way. It leaves the first row at its LEFT edge,
-                        // continues from the right on each following row, and
-                        // ends part-way across the last. Rows are banded to
-                        // their own extent, not the content width — a
-                        // right-aligned row doesn't span it.
-                        let row_of = |y: Pixels| {
-                            (f32::from(y) / f32::from(lh).max(1.0)).round().max(0.) as usize
-                        };
-                        let (ka, kb) = (row_of(pa.y), row_of(pb.y));
-                        let mut band = |k: usize, from: Option<Pixels>, to: Option<Pixels>| {
-                            let (l, rt) = r.row_extent(k);
-                            let (l, rt) = (l + inset, rt + inset);
-                            let (x0, x1) = (from.unwrap_or(l), to.unwrap_or(rt));
-                            if x1 > x0 {
-                                sels.push(fill(
-                                    Bounds::from_corners(
-                                        to_screen(top, point(x0, lh * k)),
-                                        to_screen(top, point(x1, lh * k + lh)),
-                                    ),
-                                    color,
-                                ));
+                    let inset=row_x(row);
+                    let display=disp_col(row,a)..disp_col(row,b);
+                    let mut paint=|k:usize,l:Pixels,r:Pixels|{
+                        let y=lh*k;
+                        sels.push(fill(Bounds::from_corners(to_screen(top,point(inset+l,y)),to_screen(top,point(inset+r,y+lh))),color));
+                    };
+                    if let Some(rtl)=bidi(row) {
+                        for (k,rr) in rtl.rows.iter().enumerate() {
+                            let start=display.start.saturating_sub(rr.start).min(rr.len);
+                            let end=display.end.saturating_sub(rr.start).min(rr.len);
+                            for (l,r) in rr.map.rects_for_range(start..end) {
+                                paint(k,rtl.shift_delta(k)+px(l),rtl.shift_delta(k)+px(r));
                             }
-                        };
-                        // The start is the row's RIGHT-hand portion: from the
-                        // row's left edge up to the caret x.
-                        band(ka, None, Some(pa.x));
-                        for k in (ka + 1)..kb.min(r.row_count()) {
-                            band(k, None, None);
                         }
-                        // ...and the last row from the end x rightwards.
-                        band(kb, Some(pb.x), None);
-                    } else {
-                        // First wrap row: start x → right edge.
-                        sels.push(fill(
-                            Bounds::from_corners(
-                                to_screen(top, pa),
-                                to_screen(top, point(right, pa.y + lh)),
-                            ),
-                            color,
-                        ));
-                        // Full middle wrap rows.
-                        let mut yy = pa.y + lh;
-                        while yy < pb.y {
-                            sels.push(fill(
-                                Bounds::from_corners(
-                                    to_screen(top, point(px(0.), yy)),
-                                    to_screen(top, point(right, yy + lh)),
-                                ),
-                                color,
-                            ));
-                            yy += lh;
-                        }
-                        // Last wrap row: left edge → end x.
-                        sels.push(fill(
-                            Bounds::from_corners(
-                                to_screen(top, point(px(0.), pb.y)),
-                                to_screen(top, point(pb.x, pb.y + lh)),
-                            ),
-                            color,
-                        ));
-                    }
+                    } else {crate::table_layout::selection_bands(line, display, paint);}
                 }
                 sels
             };
@@ -2351,10 +2222,10 @@ impl Element for EditorElement {
         let mut code_chip_rects = Vec::new();
         for chip in &prepaint.code_chips {
             for (bounds_, text, hb) in [
-                (chip.lang_bounds, &chip.lang_text, &chip.lang_hb),
-                (chip.copy_bounds, &chip.copy_text, &chip.copy_hb),
+                (chip.lang_bounds, &chip.lang_text, chip.lang_hb.as_ref()),
+                (chip.copy_bounds, &chip.copy_text, Some(&chip.copy_hb)),
             ] {
-                let hovered = hb.is_hovered(window);
+                let hovered = hb.is_some_and(|h|h.is_hovered(window));
                 window.paint_quad(PaintQuad {
                     bounds: bounds_,
                     corner_radii: Corners::all(px(4.)),
@@ -2386,7 +2257,7 @@ impl Element for EditorElement {
                     window,
                     cx,
                 );
-                window.set_cursor_style(CursorStyle::PointingHand, hb);
+                if let Some(hb)=hb{window.set_cursor_style(CursorStyle::PointingHand, hb);}
             }
             code_chip_rects.push(CodeChipHit {
                 lang: chip.lang_bounds,
@@ -3058,6 +2929,7 @@ fn shape_document(
     // Active GitHub alert run (`> [!NOTE]` …): set by a marker line, carried
     // while blockquote lines continue, cleared by anything else — so every
     // line of the alert gets the kind's bar color.
+    let mut list_body: Option<(usize,Pixels)> = None;
     let mut alert_run: Option<Hsla> = None;
     let mut y_acc = px(0.);
     for (idx, &line) in lines.iter().enumerate() {
@@ -3547,6 +3419,16 @@ fn shape_document(
             }
         } else {
             None
+        };
+        let gutter=match gutter {
+            Some((plen,mark @ (LineMark::Check{..}|LineMark::List{..})))=>{
+                list_body=Some((plen,mark.inset()));
+                Some((plen,mark))
+            }
+            None if !is_code && table.is_none() && widget.is_none() && list_body.is_some_and(|(plen,_)|line.as_bytes().get(..plen).is_some_and(|ws|ws.iter().all(|b| matches!(b,b' '|b'\t'))))=>{
+                list_body.map(|(plen,inset)|(plen,LineMark::Continuation(inset)))
+            }
+            other=>{if !line.trim().is_empty(){list_body=None;}other}
         };
         let caret_here = caret_col.is_some();
         // A thematic break (`---`) renders as a full-width divider, but only while

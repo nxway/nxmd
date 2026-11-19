@@ -1144,7 +1144,7 @@ fn cell_font(font: &Font, is_header: bool) -> Font {
 /// Shape a table cell's `content` into a single (unwrapped) line, for exact
 /// caret / hit-test geometry that matches the kerned glyphs `paint_table_row`
 /// renders (measuring prefixes in isolation drifts by their kerning).
-fn shape_cell(
+pub(super) fn shape_cell(
     window: &mut Window,
     cell: &ProjectedCell,
     font_size: Pixels,
@@ -1322,7 +1322,7 @@ pub(crate) fn table_caret_pos(
 }
 
 /// Match GPUI's per-wrap-line paint alignment, including a short last line.
-fn cell_alignment(t: &TableRow, cell: usize) -> gpui::TextAlign {
+pub(super) fn cell_alignment(t: &TableRow, cell: usize) -> gpui::TextAlign {
     match t.aligns.get(cell) {
         Some(markdown_syntax::Align::Center) => gpui::TextAlign::Center,
         Some(markdown_syntax::Align::Right) => gpui::TextAlign::Right,
@@ -1331,7 +1331,7 @@ fn cell_alignment(t: &TableRow, cell: usize) -> gpui::TextAlign {
     }
 }
 
-fn cell_alignment_offset(
+pub(super) fn cell_alignment_offset(
     line: &WrappedLine,
     y: Pixels,
     line_h: Pixels,

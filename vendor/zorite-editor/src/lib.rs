@@ -50,6 +50,7 @@ mod image_embed;
 pub use markdown_syntax::{AlertIcons, MathAlign, PropertyIconFn, SyntaxStyle};
 
 mod table_layout;
+mod line_edit;
 mod tables;
 use tables::*;
 
@@ -77,6 +78,7 @@ actions!(
         SelectDown,
         SelectAll,
         Newline,
+        HardBreak,
         Paste,
         Copy,
         Cut,
@@ -125,6 +127,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-up", SelectUp, ctx),
         KeyBinding::new("shift-down", SelectDown, ctx),
         KeyBinding::new("enter", Newline, ctx),
+        KeyBinding::new("shift-enter", HardBreak, ctx),
         KeyBinding::new("tab", Indent, ctx),
         KeyBinding::new("shift-tab", Outdent, ctx),
         KeyBinding::new("cmd-a", SelectAll, ctx),
@@ -2409,6 +2412,12 @@ impl EditorState {
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
+        self.insert_break(false,window,cx);
+    }
+    fn hard_break(&mut self,_:&HardBreak,window:&mut Window,cx:&mut Context<Self>){
+        self.insert_break(true,window,cx);
+    }
+    fn insert_break(&mut self,hard:bool,window:&mut Window,cx:&mut Context<Self>){
         // Inside a table, a raw newline would split the row's `| … |` markup.
         // Enter instead moves to the cell directly below (next row, same column,
         // spreadsheet-style); from the last row it exits onto a fresh line below
@@ -2450,46 +2459,11 @@ impl EditorState {
                 return;
             }
         }
-        // List auto-continuation: Enter on a list/task item opens the next item
-        // (same marker + indent; ordered numbers increment); Enter on an *empty*
-        // item removes the marker, exiting the list. Only with a collapsed
-        // selection — a selection is just replaced by the newline.
-        if self.selected_range.is_empty() {
-            let cursor = self.cursor_offset();
-            let line_start = self.content[..cursor].rfind('\n').map_or(0, |i| i + 1);
-            let line_end = self.content[line_start..]
-                .find('\n')
-                .map_or(self.content.len(), |i| line_start + i);
-            let line = &self.content[line_start..line_end];
-            if let Some((prefix_len, indent, ordered, num)) = markdown_syntax::list_prefix(line) {
-                let task = markdown_syntax::task_prefix(line);
-                let content_start = task.map_or(prefix_len, |(l, ..)| l);
-                let empty = line.get(content_start..).unwrap_or("").trim().is_empty();
-                let cont = if empty {
-                    None
-                } else {
-                    let ws = &line[..indent];
-                    let bullet = line.as_bytes()[indent] as char;
-                    Some(if task.is_some() {
-                        format!("\n{ws}{bullet} [ ] ")
-                    } else if ordered {
-                        format!("\n{ws}{}. ", num + 1)
-                    } else {
-                        format!("\n{ws}{bullet} ")
-                    })
-                };
-                match cont {
-                    // Empty item: clear the marker, leaving an empty line.
-                    None => {
-                        self.selected_range = line_start..line_end;
-                        self.replace_text_in_range(None, "", window, cx);
-                    }
-                    Some(text) => self.replace_text_in_range(None, &text, window, cx),
-                }
-                return;
-            }
-        }
-        self.replace_text_in_range(None, "\n", window, cx);
+        let (range,text)=line_edit::newline(&self.content,self.selected_range.clone(),hard,self.markdown_style.is_some());
+        // Pass an explicit replacement range so undo remembers the user's
+        // original selection, including a collapsed caret on an empty item.
+        let range=self.range_to_utf16(&range);
+        self.replace_text_in_range(Some(range), &text, window, cx);
     }
 
     /// Toggle an inline wrapping marker (`**` bold, `*` italic, `` ` `` code)
@@ -2903,14 +2877,7 @@ impl EditorState {
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
-            let range = self.copy_range();
-            // Ordered markers copy at their DISPLAYED positions (still digit
-            // markdown), so a paste counts the way the screen did.
-            let text = if self.markdown_style.is_some() {
-                markdown_syntax::copy_source(&self.content, range)
-            } else {
-                self.content[range].to_string()
-            };
+            let text = self.content[self.selected_range.clone()].to_owned();
             self.write_clipboard(text, cx);
         }
     }
@@ -2920,12 +2887,7 @@ impl EditorState {
     /// menu's "Copy as Markdown"). Same exact-source selection rules as `copy`.
     pub fn copy_plain(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
-            let range = self.copy_range();
-            let text = if self.markdown_style.is_some() {
-                markdown_syntax::copy_source(&self.content, range)
-            } else {
-                self.content[range].to_string()
-            };
+            let text = self.content[self.selected_range.clone()].to_owned();
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -2936,35 +2898,6 @@ impl EditorState {
         match &self.clipboard_writer {
             Some(writer) => writer(&text, cx),
             None => cx.write_to_clipboard(ClipboardItem::new_string(text)),
-        }
-    }
-
-    /// What a copy takes: the selection — extended back over the first
-    /// line's hidden list/task/quote prefix when the selection is multi-line
-    /// and starts exactly at that line's body start. With markers painted
-    /// (not text), "select the whole list" visually anchors AFTER the first
-    /// `1. `, so a verbatim copy dropped the first marker while every other
-    /// line kept its own. Raw mode (no markdown style) copies verbatim.
-    fn copy_range(&self) -> std::ops::Range<usize> {
-        let (start, end) = (
-            self.selected_range.start.min(self.selected_range.end),
-            self.selected_range.start.max(self.selected_range.end),
-        );
-        if self.markdown_style.is_none() || !self.content[start..end].contains('\n') {
-            return start..end;
-        }
-        let line_start = self.content[..start].rfind('\n').map_or(0, |i| i + 1);
-        let line_end = self.content[line_start..]
-            .find('\n')
-            .map_or(self.content.len(), |i| line_start + i);
-        let line = &self.content[line_start..line_end];
-        let prefix_len = markdown_syntax::task_prefix(line)
-            .map(|(l, ..)| l)
-            .or_else(|| markdown_syntax::list_prefix(line).map(|(l, ..)| l))
-            .or_else(|| markdown_syntax::blockquote_prefix(line));
-        match prefix_len {
-            Some(plen) if start == line_start + plen => line_start..end,
-            _ => start..end,
         }
     }
 
@@ -4860,7 +4793,7 @@ impl EditorState {
         self.code_chip_rects.iter().find_map(|c| {
             if c.copy.contains(&position) {
                 Some((true, c.fence_row))
-            } else if c.lang.contains(&position) {
+            } else if !self.code_langs.is_empty() && c.lang.contains(&position) {
                 Some((false, c.fence_row))
             } else {
                 None
@@ -5059,6 +4992,8 @@ impl EditorState {
             return self.previous_boundary(offset);
         }
         let (row0, col0) = self.row_col(offset);
+        let prefix=self.hidden_prefix_len(row0);
+        if prefix>0 && col0 <= prefix { return self.previous_boundary(offset); }
         let d0 = self.display_col(row0, col0);
         let mut off = self.previous_boundary(offset);
         loop {
@@ -5082,6 +5017,8 @@ impl EditorState {
             return self.next_boundary(offset);
         }
         let (row0, col0) = self.row_col(offset);
+        let prefix=self.hidden_prefix_len(row0);
+        if prefix>0 && col0 < prefix { return self.next_boundary(offset); }
         let d0 = self.display_col(row0, col0);
         let mut off = self.next_boundary(offset);
         loop {
@@ -5381,6 +5318,7 @@ impl Render for EditorState {
             .on_action(cx.listener(Self::select_doc_end))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::newline))
+            .on_action(cx.listener(Self::hard_break))
             .on_action(cx.listener(Self::bold))
             .on_action(cx.listener(Self::italic))
             .on_action(cx.listener(Self::underline))
@@ -6454,7 +6392,7 @@ struct CodeChip {
     /// readable over a long first line.
     bg: Hsla,
     fg: Hsla,
-    lang_hb: Hitbox,
+    lang_hb: Option<Hitbox>,
     copy_hb: Hitbox,
 }
 
@@ -6513,6 +6451,7 @@ const CHECKBOX_SCALE: f32 = 0.9;
 /// room. Covers blockquotes now; list bullets + task checkboxes reuse it.
 #[derive(Clone, Copy)]
 enum LineMark {
+    Continuation(Pixels),
     /// Blockquote: a left border (`bar`); the `>` markers are hidden. `text`
     /// colors the body — `Some` = muted quote tone, `None` = the editor's
     /// normal text color (alert bodies).
@@ -6565,6 +6504,7 @@ impl LineMark {
     /// Horizontal inset (px) applied to the body text + caret for this mark.
     fn inset(self) -> Pixels {
         match self {
+            LineMark::Continuation(inset)=>inset,
             LineMark::Quote { .. } => px(QUOTE_INSET),
             LineMark::Alert { text_inset, .. } => text_inset,
             LineMark::List { text_inset, .. } | LineMark::Check { text_inset, .. } => text_inset,

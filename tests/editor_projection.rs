@@ -23,3 +23,6 @@ fn outer_list_resumes_after_nested_continuation() {
         }
     }
 }
+
+#[path = "../vendor/zorite-editor/src/line_edit.rs"]
+mod line_edit;
