@@ -179,9 +179,11 @@ foreach ($step in 1..16) {
     [System.Windows.Forms.SendKeys]::SendWait('^{END}^v')
     Wait-SavedText $wrappedListPath ($model+$fragment) "Seed 73217 paste $step"
     if ($rng.Next(2) -eq 0) {
-        [System.Windows.Forms.SendKeys]::SendWait('^z^s')
+        [System.Windows.Forms.SendKeys]::SendWait('^z')
+        [System.Windows.Forms.SendKeys]::SendWait('^s')
         Wait-SavedText $wrappedListPath $model "Seed 73217 undo $step"
-        [System.Windows.Forms.SendKeys]::SendWait('^+z^s')
+        [System.Windows.Forms.SendKeys]::SendWait('^+z')
+        [System.Windows.Forms.SendKeys]::SendWait('^s')
         Wait-SavedText $wrappedListPath ($model+$fragment) "Seed 73217 redo $step"
     }
     $model+=$fragment
