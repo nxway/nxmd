@@ -204,3 +204,22 @@ fn sprint2_save_reopen_preserves_source_and_unrelated_bytes() -> anyhow::Result<
     }
     Ok(())
 }
+
+#[test]
+fn unchanged_save_retains_identity_and_rechecks_baseline() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let v = Vault::open(dir.path())?;
+    let p = dir.path().join("note.md");
+    fs::write(&p, "source")?;
+    let alias = dir.path().join("identity");
+    fs::hard_link(&p, &alias)?;
+    let mut doc = v.load(Path::new("note.md"))?;
+    let timestamp = fs::metadata(&p)?.modified()?;
+    v.save(&mut doc)?;
+    assert_eq!(fs::metadata(&p)?.modified()?, timestamp);
+    fs::write(alias, "external")?;
+    assert_eq!(fs::read(&p)?, b"external");
+    assert!(v.save(&mut doc).is_err());
+    assert_eq!(fs::read(p)?, b"external");
+    Ok(())
+}

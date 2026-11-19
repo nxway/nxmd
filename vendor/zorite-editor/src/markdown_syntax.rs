@@ -131,7 +131,7 @@ struct Style {
     /// Non-zero on a formatting marker: the opener and closer of one construct
     /// share an id, so `fmt_marker_pairs` can pair them even with NESTED
     /// constructs between (adjacency no longer identifies the pair).
-    pair_id: u16,
+    pair_id: usize,
     /// What a hidden marker paints in its place (e.g. a block link's `#^`
     /// shows ` → `): every replacement byte maps back to the span's start, so
     /// the display↔source maps stay consistent. `None` = plain removal.
@@ -274,25 +274,19 @@ fn run_for(
 /// `spans` must be sorted by `range.start` and non-overlapping. Used to reveal
 /// only the construct the caret sits in (#5).
 fn construct_at(spans: &[Span], c: usize) -> Range<usize> {
-    let mut pairs = Vec::new();
-    for (i, opener) in spans
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.style.pair_id != 0)
-    {
-        if let Some(closer) = spans[i + 1..]
-            .iter()
-            .find(|s| s.style.pair_id == opener.style.pair_id)
-        {
-            let range = opener.range.start..closer.range.end;
-            if range.start <= c && c <= range.end {
-                pairs.push(range);
-            }
+    let mut open = Vec::new();
+    let mut active = 0..0;
+    for span in spans.iter().filter(|s| s.style.pair_id != 0) {
+        let id = span.style.pair_id;
+        if let Some(i) = open.iter().position(|&(key, _)| key == id) {
+            let (_, start) = open.remove(i);
+            let range = start..span.range.end;
+            if start <= c && c <= range.end && range.len() >= active.len() { active = range; }
+        } else {
+            open.push((id, span.range.start));
         }
     }
-    if let Some(range) = pairs.into_iter().max_by_key(|r| r.len()) {
-        return range;
-    }
+    if !active.is_empty() { return active; }
     let mut i = 0;
     while i < spans.len() {
         let start = spans[i].range.start;
@@ -541,7 +535,7 @@ pub(crate) fn fmt_marker_pairs(line: &str, st: &SyntaxStyle) -> Vec<(Range<usize
     // The scanner stamps each construct's opener + closer with a shared
     // `pair_id`, so pairing survives NESTED constructs between them (the old
     // adjacency walk assumed at most one body span).
-    let mut open: Vec<(u16, Range<usize>)> = Vec::new();
+    let mut open: Vec<(usize, Range<usize>)> = Vec::new();
     let mut pairs = Vec::new();
     for sp in spans.into_iter().filter(|s| s.style.format_marker) {
         let id = sp.style.pair_id;
@@ -576,7 +570,7 @@ fn hsla_of(rgba: u32) -> Hsla {
     gpui::rgba(rgba).into()
 }
 
-fn fmt_marker(out: &mut Vec<Span>, range: Range<usize>, color: Hsla, pair_id: u16) {
+fn fmt_marker(out: &mut Vec<Span>, range: Range<usize>, color: Hsla, pair_id: usize) {
     out.push(Span {
         range,
         style: Style {
@@ -602,7 +596,7 @@ fn scan_styled_body(
     out: &mut Vec<Span>,
     style: Style,
     depth: u8,
-    next_id: &mut u16,
+    next_id: &mut usize,
 ) {
     if s >= e {
         return;
@@ -734,7 +728,7 @@ fn scan_line(text: &str, start: usize, end: usize, st: &SyntaxStyle, out: &mut V
             return;
         }
     }
-    let mut next_id = 1u16;
+    let mut next_id = 1usize;
     scan_inline(text, i, end, st, out, &Style::default(), 0, &mut next_id);
 }
 
@@ -752,7 +746,7 @@ fn scan_inline(
     out: &mut Vec<Span>,
     base: &Style,
     depth: u8,
-    next_id: &mut u16,
+    next_id: &mut usize,
 ) {
     let b = text.as_bytes();
     let mut i = start;
@@ -1640,10 +1634,10 @@ pub(crate) fn ordered_numbers(lines: &[&str]) -> Vec<(u32, usize)> {
                 .bytes()
                 .take_while(|b| matches!(b, b' ' | b'\t'))
                 .count();
-            let hanging =
-                !line.trim().is_empty() && stack.last().is_some_and(|&(ind, ..)| ws > ind);
-            if !hanging && !line.trim().is_empty() {
-                stack.clear();
+            if !line.trim().is_empty() {
+                while stack.last().is_some_and(|&(ind, ..)| ws <= ind) {
+                    stack.pop();
+                }
             }
             continue;
         };
@@ -3078,6 +3072,13 @@ mod tests {
             mono: gpui::font("monospace"),
             property_icon: None,
         }
+    }
+
+    #[test]
+    fn long_line_marker_ids_and_last_caret_do_not_wrap() {
+        let source = "`x` ".repeat(65536);
+        let result = cell_runs(&source, &Font::default(), Hsla::default(), Some(source.len()-3), false, &test_style());
+        assert!(result.0.ends_with("`x` "));
     }
 
     #[test]

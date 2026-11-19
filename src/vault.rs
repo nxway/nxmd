@@ -176,6 +176,9 @@ impl Vault {
                 "External change detected. Your edits remain in memory; save a copy before reloading."
             );
         }
+        if doc.text.as_bytes() == doc.baseline {
+            return Ok(());
+        }
         let mut temp = tempfile::NamedTempFile::new_in(path.parent().context("Missing parent")?)?;
         temp.write_all(doc.text.as_bytes())?;
         temp.as_file().sync_all()?;

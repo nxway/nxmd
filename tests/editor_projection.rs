@@ -9,3 +9,17 @@ mod markdown_syntax;
 
 #[path = "../vendor/zorite-editor/src/table_layout.rs"]
 mod table_layout;
+
+#[test]
+fn outer_list_resumes_after_nested_continuation() {
+    for marker in ["   1. inner", "   4. inner"] {
+        for (continuation, expected) in [
+            ("paragraph", 1),
+            ("   outer continuation", 8),
+            ("      inner continuation", 8),
+        ] {
+            let lines = ["7. outer", "", marker, "", continuation, "1. next"];
+            assert_eq!(markdown_syntax::ordered_numbers(&lines)[5].0, expected);
+        }
+    }
+}
