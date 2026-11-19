@@ -74,7 +74,7 @@ $g.Clear([Drawing.Color]::Lime);$g.Dispose();[System.Windows.Forms.Clipboard]::S
 $importWatch=[Diagnostics.Stopwatch]::StartNew()
 [System.Windows.Forms.SendKeys]::SendWait('^v')
 $imported=Join-Path $imagesVault 'attachments/image-1.png'
-Wait-ImageCondition { (Test-Path $imported) -and [IO.File]::ReadAllText($imageNote).Contains('![](attachments/image-1.png)') } 'Native clipboard image did not import and autosave'
+Wait-ImageCondition { (Test-Path $imported) -and ([string](Read-SmokeSnapshot $imageNote)).Contains('![](attachments/image-1.png)') } 'Native clipboard image did not import and autosave'
 $importHash=(Get-FileHash $imported).Hash
 # attachments must have appeared automatically as the first folder; expand and open.
 [NativeSmoke]::Click($mainWindow,100,119)
@@ -93,7 +93,7 @@ if ((Get-FileHash $imageNote).Hash -ne $imageSourceHash) { throw 'Switching imag
 [System.Windows.Forms.SendKeys]::SendWait('^+z')
 [System.Windows.Forms.SendKeys]::SendWait('^s')
 Start-Sleep -Milliseconds 300
-if (![IO.File]::ReadAllText($imageNote).Contains('![](attachments/image-1.png)')) { throw 'Image insertion redo failed' }
+if (!([string](Read-SmokeSnapshot $imageNote)).Contains('![](attachments/image-1.png)')) { throw 'Image insertion redo failed' }
 # Native watcher: create/rename/delete externally, with no F5 or vault reopen.
 $external=Join-Path $imagesVault '0 External.webp'
 Copy-Item (Join-Path $PSScriptRoot '../tests/fixtures/sample.webp') $external

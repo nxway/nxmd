@@ -48,13 +48,35 @@ function Assert-Alive {
 # SendWait uses SendInput on modern Windows: it can return before another
 # process handles the queued input. Observe completion instead of assuming that
 # 400 ms is enough on a hosted runner. Never resend typing or save commands.
+# In-flight ReplaceFileW can briefly move the old name to its backup. Readers
+# observing autosave must allow delete sharing and wait for a committed snapshot.
+function Read-SmokeSnapshot([string]$Path, [switch]$Hash) {
+    try {
+        $stream=[IO.File]::Open($Path,'Open','Read',([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    } catch [IO.FileNotFoundException] { return $null }
+    try {
+        if ($Hash) { return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)) }
+        $reader=[IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true)
+        try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally { $stream.Dispose() }
+}
+function Wait-SavedInsertion([string]$Path,[string]$Marker) {
+    $timer=[Diagnostics.Stopwatch]::StartNew()
+    do {
+        Assert-Alive
+        $value=Read-SmokeSnapshot $Path
+        if ($null -ne $value -and $value.Contains($Marker)) { return $value }
+        Start-Sleep -Milliseconds 50
+    } while ($timer.Elapsed.TotalSeconds -lt 10)
+    throw "Saved insertion '$Marker' missing from $Path after 10 seconds"
+}
 function Wait-SavedText([string]$Path,[string]$Expected,[string]$Message) {
     $timer=[Diagnostics.Stopwatch]::StartNew()
     $actual=$null
     do {
         Assert-Alive
-        try { $actual=[IO.File]::ReadAllText($Path) } catch [IO.IOException] { $actual=$null }
-        if ($actual -ceq $Expected) {
+         $actual=Read-SmokeSnapshot $Path
+        if ($null -ne $actual -and $actual -ceq $Expected) {
             "$Message verified after $($timer.ElapsedMilliseconds) ms" | Add-Content (Join-Path $resultDir 'input-sync.txt')
             return
         }
@@ -73,7 +95,7 @@ function Assert-EditorText([string]$Expected) {
     do {
         Assert-Alive
         $actual=[System.Windows.Forms.Clipboard]::GetText()
-        if ($actual -ceq $Expected) {
+        if ($null -ne $actual -and $actual -ceq $Expected) {
             "Editor input/copy verified after $($timer.ElapsedMilliseconds) ms; foreground=$([NativeSmoke]::GetForegroundWindow()), owner=$mainWindow" | Add-Content (Join-Path $resultDir 'input-sync.txt')
             [System.Windows.Forms.SendKeys]::SendWait('^{END}')
             return

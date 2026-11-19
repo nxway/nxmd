@@ -109,8 +109,7 @@ Check-EditorSource $tableEdit $tablePath 'Narrow table caret mapping'
 Check-EditorSource $table $tablePath 'Narrow table undo'
 # Down must visit the second wrapped visual line of Details, not the next row.
 [System.Windows.Forms.SendKeys]::SendWait('^{HOME}{DOWN}{TAB}{DOWN}Z^s')
-Wait-ImageCondition { [IO.File]::ReadAllText($tablePath).Contains('Z') } 'Wrapped table movement did not insert'
-$wrappedEdit=[IO.File]::ReadAllText($tablePath)
+$wrappedEdit=Wait-SavedInsertion $tablePath 'Z'
 $at=$wrappedEdit.IndexOf('Z')
 $sentenceStart=$table.IndexOf('A longer sentence')
 $sentenceEnd=$table.IndexOf(' | Café')
@@ -121,8 +120,7 @@ Check-EditorSource $wrappedEdit $tablePath 'Wrapped table source mapping'
 [System.Windows.Forms.SendKeys]::SendWait('^z')
 Check-EditorSource $table $tablePath 'Wrapped table movement edit undo'
 [System.Windows.Forms.SendKeys]::SendWait('^{HOME}{DOWN}{TAB}{DOWN 2}Y^s')
-Wait-ImageCondition { [IO.File]::ReadAllText($tablePath).Contains('Y') } 'Repeated wrapped table movement did not insert'
-$secondEdit=[IO.File]::ReadAllText($tablePath)
+$secondEdit=Wait-SavedInsertion $tablePath 'Y'
 $secondAt=$secondEdit.IndexOf('Y')
 if ($secondEdit.Remove($secondAt,1) -cne $table -or $secondAt -le $at -or $secondAt -ge $sentenceEnd) {
     throw 'Repeated Down did not progress through the wrapped cell'
@@ -135,12 +133,12 @@ $shot=Capture-Images 'editor-table-narrow.png';$shot.Dispose()
 [void][EditorSmokeWindow]::MoveWindow($mainWindow,0,0,1100,760,$true)
 Open-EditorFixture 3 '04 Preserved.md'
 [System.Windows.Forms.SendKeys]::SendWait('^s')
-Wait-ImageCondition { (Get-FileHash $preservedPath).Hash -eq $preservedHash } 'Unchanged BOM/CRLF/YAML preservation'
+Wait-ImageCondition { (Read-SmokeSnapshot $preservedPath -Hash) -eq $preservedHash } 'Unchanged BOM/CRLF/YAML preservation'
 [System.Windows.Forms.SendKeys]::SendWait('^{END}x^s')
 Wait-SavedText $preservedPath ($preserved+'x') 'Editing BOM/CRLF fixture changed unrelated source'
 [System.Windows.Forms.SendKeys]::SendWait('^z')
 [System.Windows.Forms.SendKeys]::SendWait('^s')
-Wait-ImageCondition { (Get-FileHash $preservedPath).Hash -eq $preservedHash } 'Undo did not restore exact BOM/CRLF/YAML bytes'
+Wait-ImageCondition { (Read-SmokeSnapshot $preservedPath -Hash) -eq $preservedHash } 'Undo did not restore exact BOM/CRLF/YAML bytes'
 # Close and reopen to verify disk -> fresh editor preservation too.
 [System.Windows.Forms.SendKeys]::SendWait('^w')
 Wait-ImageCondition { (Active-ImagePath) -ne '04 Preserved.md' } 'Preservation fixture did not close'
@@ -149,12 +147,11 @@ Open-EditorFixture 3 '04 Preserved.md'
 Wait-SavedText $preservedPath ($preserved+'x') 'Reopened fixture changed unrelated source'
 [System.Windows.Forms.SendKeys]::SendWait('^z')
 [System.Windows.Forms.SendKeys]::SendWait('^s')
-Wait-ImageCondition { (Get-FileHash $preservedPath).Hash -eq $preservedHash } 'Reopened fixture undo lost original bytes'
+Wait-ImageCondition { (Read-SmokeSnapshot $preservedPath -Hash) -eq $preservedHash } 'Reopened fixture undo lost original bytes'
 Open-EditorFixture 4 '05 Wrapped.md'
 Check-EditorSource $wrappedList $wrappedListPath 'Wrapped list original ordinals'
 [System.Windows.Forms.SendKeys]::SendWait('^{HOME}{DOWN}Z^s')
-Wait-ImageCondition { [IO.File]::ReadAllText($wrappedListPath).Contains('Z') } 'Wrapped list movement did not insert'
-$listEdit=[IO.File]::ReadAllText($wrappedListPath)
+$listEdit=Wait-SavedInsertion $wrappedListPath 'Z'
 $at=$listEdit.IndexOf('Z')
 if ($listEdit.Remove($at,1) -cne $wrappedList -or $at -le 3 -or $at -ge $wrappedList.IndexOf("`n")) {
     throw 'Down skipped a wrapped list line or changed its marker'
