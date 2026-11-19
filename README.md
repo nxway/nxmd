@@ -24,11 +24,13 @@ The vault argument is optional; the previous session is restored otherwise. Ctrl
 * Folder creation, sidebar toggle and safe tab closing.
 * Non-overwriting note move/rename; note deletion retains a recovery copy in `.nxmd-trash`.
 
+Crash recovery, conflict review, retained backups and separate-copy recovery are described in [Saving and recovery on Windows](docs/reliability.md).
+
 See [image behavior, safety limits and validation](docs/images.md) for Obsidian block embeds, background loading, cache limits and watcher behavior.
 
 ## Still incomplete
 
-Comprehensive IME and clipboard testing; folder rename/move/delete controls; tab reordering; recent-vault picker; settings UI and configurable attachments location; conflict reload/merge; recovery after crashes; follow-link actions; virtualized large-document rendering. Image paste inserts at the caret rather than replacing a selection. Basic external-file-drop semantics need native OS testing.
+Comprehensive IME and clipboard testing; folder rename/move/delete controls; tab reordering; recent-vault picker; settings UI and configurable attachments location; follow-link actions; virtualized large-document rendering. Image paste inserts at the caret rather than replacing a selection. Basic external-file-drop semantics need native OS testing.
 
 This is an initial implementation, not a completed production release. See [foundation and safety decisions](docs/architecture.md). The Windows workflow records comparable process measurements; methodology and limitations are in the validation record.
 

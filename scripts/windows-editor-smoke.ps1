@@ -169,4 +169,21 @@ Check-EditorSource $listInserted $wrappedListPath 'List continuation rewrote unr
 [System.Windows.Forms.SendKeys]::SendWait('^z')
 [System.Windows.Forms.SendKeys]::SendWait('^z')
 Check-EditorSource $wrappedList $wrappedListPath 'List structural edit undo'
+# Fixed seed and an independent source string make a failure replayable.
+$rng=[Random]::new(73217)
+$fragments=@(' **bold**',' ~~strike~~',' é',' Привет',' 日本語',' 🙂',' | cell |')
+$model=$wrappedList
+foreach ($step in 1..16) {
+    $fragment=$fragments[$rng.Next($fragments.Count)]
+    [System.Windows.Forms.Clipboard]::SetText($fragment)
+    [System.Windows.Forms.SendKeys]::SendWait('^{END}^v')
+    Wait-SavedText $wrappedListPath ($model+$fragment) "Seed 73217 paste $step"
+    if ($rng.Next(2) -eq 0) {
+        [System.Windows.Forms.SendKeys]::SendWait('^z^s')
+        Wait-SavedText $wrappedListPath $model "Seed 73217 undo $step"
+        [System.Windows.Forms.SendKeys]::SendWait('^+z^s')
+        Wait-SavedText $wrappedListPath ($model+$fragment) "Seed 73217 redo $step"
+    }
+    $model+=$fragment
+}
 'PASS: rapid formatting-boundary navigation, typing/delete/backspace, multi-block selection, undo/redo, tab selection/history, Unicode clipboard/grapheme deletion, table cell navigation/editing at wide and narrow widths, exact BOM/CRLF/YAML save and reopen.' | Tee-Object (Join-Path $resultDir 'editor-result.txt')

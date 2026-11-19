@@ -2,6 +2,7 @@
 mod design;
 mod diagnostics;
 mod image_store;
+mod review;
 mod theme;
 mod ui;
 use gpui::*;
@@ -16,6 +17,7 @@ fn main() {
             zorite_editor::bind_keys(cx);
             cx.bind_keys([
                 KeyBinding::new("f5", ui::RefreshExplorer, None),
+                KeyBinding::new("ctrl-shift-r", ui::Recover, None),
                 KeyBinding::new("escape", ui::DismissMenu, None),
                 KeyBinding::new("ctrl-s", ui::Save, None),
                 KeyBinding::new("ctrl-w", ui::CloseTab, None),

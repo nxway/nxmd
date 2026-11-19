@@ -15,6 +15,7 @@ actions!(
     nxmd,
     [
         Save,
+        Recover,
         OpenVault,
         NewNote,
         CloseTab,
@@ -35,7 +36,11 @@ struct Tab {
     path: PathBuf,
     content: TabContent,
     dirty: Option<Instant>,
-    conflict: bool,
+    issue: Option<String>,
+    generation: u64,
+    checkpoint: u64,
+    next_checkpoint: Instant,
+    slot: Option<nxmd::recovery::Slot>,
 }
 impl Tab {
     fn editor(&self) -> Option<&Entity<EditorState>> {
@@ -75,6 +80,8 @@ pub struct Workspace {
     entries: Vec<(Entry, usize)>,
     status: String,
     session: Session,
+    pending: Vec<nxmd::recovery::Candidate>,
+    checkpoint_busy: bool,
     _timer: Task<()>,
 }
 impl Workspace {
@@ -84,6 +91,8 @@ impl Workspace {
             weak.update(cx, |this: &mut Self, cx| {
                 for i in 0..this.tabs.len() {
                     if this.tabs[i].dirty.is_some() && !this.save_tab(i, cx) {
+                        log::warn!("Window close blocked by unsaved note");
+                        this.active = i;
                         cx.notify();
                         return false;
                     }
@@ -109,7 +118,17 @@ impl Workspace {
                 }
             }
         });
-        let paths = session.tabs.clone();
+        let paths = if vault.as_ref().map(|v| &v.root)
+            == session
+                .vault
+                .as_ref()
+                .and_then(|p| dunce::canonicalize(p).ok())
+                .as_ref()
+        {
+            session.tabs.clone()
+        } else {
+            vec![]
+        };
         let active = session.active;
         let catalog = vault.clone().map(nxmd::catalog::Catalog::new);
         let mut app = Self {
@@ -135,8 +154,11 @@ impl Workspace {
             entries: vec![],
             status: "Local Markdown · Live Preview".into(),
             session,
+            pending: vec![],
+            checkpoint_busy: false,
             _timer: timer,
         };
+        app.scan_recovery();
         app.refresh();
         for path in paths {
             app.open(path, window, cx);
@@ -230,7 +252,11 @@ impl Workspace {
                 path,
                 content: TabContent::Image,
                 dirty: None,
-                conflict: false,
+                issue: None,
+                generation: 0,
+                checkpoint: 0,
+                next_checkpoint: Instant::now(),
+                slot: None,
             });
             self.active = self.tabs.len() - 1;
             self.focus_active(window, cx);
@@ -276,6 +302,7 @@ impl Workspace {
                             .iter_mut()
                             .find(|t| t.editor().is_some_and(|e| *e == ed))
                         {
+                            tab.generation += 1;
                             tab.dirty = Some(Instant::now());
                         }
                         cx.notify();
@@ -290,7 +317,11 @@ impl Workspace {
                         _subscription: subscription,
                     },
                     dirty: None,
-                    conflict: false,
+                    issue: None,
+                    generation: 0,
+                    checkpoint: 0,
+                    next_checkpoint: Instant::now(),
+                    slot: None,
                 });
                 self.active = self.tabs.len() - 1;
                 self.focus_active(window, cx);
@@ -300,7 +331,143 @@ impl Workspace {
             Err(e) => self.status = e.to_string(),
         }
     }
+    fn recovery_root() -> PathBuf {
+        Session::path().with_file_name("recovery-v1")
+    }
+    fn scan_recovery(&mut self) {
+        self.pending.clear();
+        match nxmd::recovery::discover(&Self::recovery_root()) {
+            Ok((items, errors)) => {
+                self.pending = items;
+                if !errors.is_empty() {
+                    self.status = format!(
+                        "Unreadable recovery records retained: {}",
+                        errors.join("; ")
+                    );
+                    log::warn!("{}", self.status);
+                }
+            }
+            Err(e) => self.status = format!("Cannot inspect recovery records: {e}"),
+        }
+    }
+    fn recover(&mut self, _: &Recover, _: &mut Window, cx: &mut Context<Self>) {
+        if self.pending.is_empty() {
+            self.scan_recovery();
+        }
+        if !self.pending.is_empty() {
+            let candidate = self.pending.remove(0);
+            if let Err(e) = crate::review::open(candidate, cx) {
+                self.status = e.to_string();
+            }
+        } else {
+            self.status = "No available recovery drafts".into();
+        }
+        cx.notify();
+    }
+    fn snapshot(
+        &mut self,
+        i: usize,
+        cx: &App,
+    ) -> anyhow::Result<(nxmd::recovery::Slot, nxmd::recovery::Draft)> {
+        let vault = self
+            .vault
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vault unavailable"))?;
+        let t = &mut self.tabs[i];
+        let TabContent::Markdown { doc, editor, .. } = &t.content else {
+            anyhow::bail!("Expected Markdown")
+        };
+        if t.slot.is_none() {
+            let root = Self::recovery_root();
+            let parent = root
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("Missing recovery parent"))?;
+            anyhow::ensure!(
+                !parent.starts_with(&vault.root),
+                "Recovery directory is inside this vault"
+            );
+            std::fs::create_dir_all(parent)?;
+            let actual = dunce::canonicalize(parent)?.join("recovery-v1");
+            anyhow::ensure!(
+                !actual.starts_with(&vault.root),
+                "Recovery directory is inside this vault"
+            );
+            if actual.exists() {
+                anyhow::ensure!(
+                    !dunce::canonicalize(&actual)?.starts_with(&vault.root),
+                    "Recovery directory resolves inside vault"
+                );
+            }
+            t.slot = Some(nxmd::recovery::Slot::new(&actual)?);
+        }
+        Ok((
+            t.slot.clone().unwrap(),
+            nxmd::recovery::Draft {
+                version: 1,
+                vault: vault.root.clone(),
+                note: t.path.clone(),
+                generation: t.generation,
+                baseline: doc.baseline_digest().to_owned(),
+                text: editor.read(cx).text().into(),
+                updated: std::time::SystemTime::now(),
+            },
+        ))
+    }
+    fn checkpoint_now(&mut self, i: usize, cx: &App) -> anyhow::Result<()> {
+        let t = &self.tabs[i];
+        if t.generation == t.checkpoint {
+            return Ok(());
+        }
+        let (slot, d) = self.snapshot(i, cx)?;
+        slot.checkpoint(&d)?;
+        self.tabs[i].checkpoint = d.generation;
+        Ok(())
+    }
+    fn schedule_checkpoint(&mut self, cx: &mut Context<Self>) {
+        if self.checkpoint_busy {
+            return;
+        }
+        let Some(i) = self.tabs.iter().position(|t| {
+            t.dirty.is_some() && t.generation != t.checkpoint && Instant::now() >= t.next_checkpoint
+        }) else {
+            return;
+        };
+        self.tabs[i].next_checkpoint = Instant::now() + Duration::from_secs(1);
+        let (slot, d) = match self.snapshot(i, cx) {
+            Ok(pair) => pair,
+            Err(e) => {
+                self.status = format!("Draft unavailable: {e}");
+                cx.notify();
+                return;
+            }
+        };
+        let editor = self.tabs[i].editor().unwrap().clone();
+        let generation = d.generation;
+        self.checkpoint_busy = true;
+        let job = cx
+            .background_executor()
+            .spawn(async move { slot.checkpoint(&d) });
+        cx.spawn(async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |s, cx| {
+                s.checkpoint_busy = false;
+                if let Some(t) = s.tabs.iter_mut().find(|t| t.editor() == Some(&editor)) {
+                    match result {
+                        Ok(()) => t.checkpoint = t.checkpoint.max(generation),
+                        Err(e) => s.status = format!("Draft write failed: {e}"),
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     fn save_tab(&mut self, i: usize, cx: &mut Context<Self>) -> bool {
+        if let Err(e) = self.checkpoint_now(i, cx) {
+            self.status = format!("Save paused: cannot protect editor draft: {e}");
+            self.tabs[i].issue = Some(self.status.clone());
+            return false;
+        }
         let Some(v) = &self.vault else {
             return false;
         };
@@ -312,12 +479,20 @@ impl Workspace {
         match v.save(doc) {
             Ok(()) => {
                 t.dirty = None;
-                t.conflict = false;
+                t.issue = None;
+                if let Some(slot) = &t.slot {
+                    if let Err(e) = slot.retire(t.generation) {
+                        self.status = format!("Saved; recovery cleanup failed: {e}");
+                        return true;
+                    }
+                }
+                t.slot = None;
                 self.status = "Saved locally".into();
                 true
             }
             Err(e) => {
-                t.conflict = true;
+                log::warn!("Save blocked: {e:#}");
+                t.issue = Some(format!("{e:#}"));
                 self.status = e.to_string();
                 false
             }
@@ -328,30 +503,27 @@ impl Workspace {
             cx.drop_image(image, None);
         }
         self.poll_images(cx);
+        self.schedule_checkpoint(cx);
         let check_external = Instant::now() >= self.next_external_check;
         if check_external {
             self.next_external_check = Instant::now() + Duration::from_secs(2);
         }
         for i in 0..self.tabs.len() {
             if check_external
-                && !self.tabs[i].conflict
-                && self
-                    .vault
-                    .as_ref()
-                    .is_some_and(|v| match &self.tabs[i].content {
-                        TabContent::Markdown { doc, .. } => v.changed(doc),
-                        _ => false,
-                    })
+                && self.tabs[i].issue.is_none()
+                && let (Some(v), TabContent::Markdown { doc, .. }) =
+                    (&self.vault, &self.tabs[i].content)
+                && let Err(e) = v.verify(doc)
             {
-                self.tabs[i].conflict = true;
-                self.status =
-                    "External change detected. Save a copy to preserve your version.".into();
+                let message = format!("{e:#}");
+                self.tabs[i].issue = Some(message.clone());
+                self.status = message;
                 cx.notify();
             }
             if self.tabs[i]
                 .dirty
                 .is_some_and(|t| t.elapsed() >= Duration::from_millis(900))
-                && !self.tabs[i].conflict
+                && self.tabs[i].issue.is_none()
             {
                 self.save_tab(i, cx);
                 cx.notify();
@@ -682,6 +854,56 @@ impl Workspace {
         }
         cx.notify();
     }
+    fn keep_close(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        let i = self.active;
+        if self.dialog_busy || i >= self.tabs.len() {
+            return;
+        }
+        if let Err(e) = self.checkpoint_now(i, cx) {
+            self.status = format!("Cannot retain draft: {e}");
+            cx.notify();
+            return;
+        }
+        self.tabs[i].dirty = None;
+        self.close_index(i, w, cx);
+        self.scan_recovery();
+        cx.notify();
+    }
+    fn reload_disk(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_busy {
+            return;
+        }
+        let i = self.active;
+        let path = self.tabs[i].path.clone();
+        match self.vault.as_ref().unwrap().load(&path) {
+            Ok(doc) => {
+                if let Err(e) = self.checkpoint_now(i, cx) {
+                    self.status = e.to_string();
+                    cx.notify();
+                    return;
+                }
+                let t = &mut self.tabs[i];
+                if let TabContent::Markdown {
+                    doc: old, editor, ..
+                } = &mut t.content
+                {
+                    editor.update(cx, |e, cx| {
+                        e.set_text(doc.text.clone(), cx);
+                        e.focus(w, cx);
+                    });
+                    *old = doc;
+                }
+                t.slot = None;
+                t.dirty = None;
+                t.issue = None;
+                t.checkpoint = t.generation;
+                self.scan_recovery();
+                self.status = "Reloaded disk version".into();
+            }
+            Err(e) => self.status = format!("Reload failed: {e:#}"),
+        }
+        cx.notify();
+    }
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.sidebar = !self.sidebar;
         self.persist();
@@ -762,10 +984,7 @@ impl Workspace {
                             this.open(rel, window, cx);
                         }
                         NewPath::Copy => {
-                            vault.create(&rel, false)?;
-                            let mut doc = vault.load(&rel)?;
-                            doc.text = text;
-                            vault.save(&mut doc)?;
+                            vault.save_copy(&rel, &text)?;
                             this.open(rel, window, cx);
                         }
                         NewPath::Move => {
@@ -1023,8 +1242,8 @@ impl Render for Workspace {
             .map(|t| {
                 if matches!(t.content, TabContent::Image) {
                     "Read-only image"
-                } else if t.conflict {
-                    "External change"
+                } else if t.issue.is_some() {
+                    "Review file"
                 } else if t.dirty.is_some() {
                     "Saving…"
                 } else {
@@ -1032,11 +1251,19 @@ impl Render for Workspace {
                 }
             })
             .unwrap_or("Local files · No account");
-        let status_color = if active.is_some_and(|t| t.conflict) {
+        let status_color = if active.is_some_and(|t| t.issue.is_some()) {
             DANGER
         } else {
             MUTED
         };
+        let issue = active.and_then(|t| t.issue.clone());
+        let recovery_banner = self.pending.first().map(|c| {
+            format!(
+                "Unsaved draft · {} · {}",
+                c.draft.vault.display(),
+                c.draft.note.display()
+            )
+        });
         let editor = active.and_then(Tab::editor).cloned();
         let image_path = active
             .filter(|t| matches!(t.content, TabContent::Image))
@@ -1086,8 +1313,8 @@ impl Render for Workspace {
                     .child(div().flex_1().min_w_0().text_ellipsis().child(title))
                     .child(
                         div()
-                            .text_color(rgb(if t.conflict { DANGER } else { ACCENT }))
-                            .child(if t.conflict {
+                            .text_color(rgb(if t.issue.is_some() { DANGER } else { ACCENT }))
+                            .child(if t.issue.is_some() {
                                 "!"
                             } else if t.dirty.is_some() {
                                 "•"
@@ -1357,6 +1584,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::dismiss_menu))
             .on_action(cx.listener(Self::paste_image))
             .on_action(cx.listener(Self::save))
+            .on_action(cx.listener(Self::recover))
             .on_action(cx.listener(Self::open_vault))
             .on_action(cx.listener(Self::new_note))
             .on_drop(cx.listener(|s, paths: &ExternalPaths, _, cx| {
@@ -1474,7 +1702,79 @@ impl Render for Workspace {
                                         "LIVE PREVIEW"
                                     })),
                             )
-                            .child(main_content),
+                            .child(main_content)
+                            .children(issue.map(|message| {
+                                div().bg(rgb(SURFACE)).p_2().child(message).child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(
+                                            crate::review::action("disk", "Inspect disk").on_click(
+                                                cx.listener(|s, _, _, cx| {
+                                                    let r = s
+                                                        .vault
+                                                        .as_ref()
+                                                        .unwrap()
+                                                        .load(&s.tabs[s.active].path)
+                                                        .and_then(|d| {
+                                                            crate::review::inspect(d.text, cx)
+                                                        });
+                                                    if let Err(e) = r {
+                                                        s.status = format!("{e:#}");
+                                                        cx.notify();
+                                                    }
+                                                }),
+                                            ),
+                                        )
+                                        .child(
+                                            crate::review::action("conf-copy", "Save as copy…")
+                                                .on_click(
+                                                    cx.listener(|s, _, w, cx| s.save_copy(w, cx)),
+                                                ),
+                                        )
+                                        .child(
+                                            crate::review::action(
+                                                "conf-reload",
+                                                "Keep draft and reload disk",
+                                            )
+                                            .on_click(
+                                                cx.listener(|s, _, w, cx| s.reload_disk(w, cx)),
+                                            ),
+                                        )
+                                        .child(
+                                            crate::review::action(
+                                                "conf-close",
+                                                "Keep draft and close",
+                                            )
+                                            .on_click(
+                                                cx.listener(|s, _, w, cx| s.keep_close(w, cx)),
+                                            ),
+                                        ),
+                                )
+                            }))
+                            .children(recovery_banner.map(|label| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .p_2()
+                                    .bg(rgb(SURFACE))
+                                    .child(
+                                        crate::review::action("restore", "Restore draft…")
+                                            .on_click(cx.listener(|s, _, w, cx| {
+                                                s.recover(&Recover, w, cx)
+                                            })),
+                                    )
+                                    .child(crate::review::action("later", "Later").on_click(
+                                        cx.listener(|s, _, _, cx| {
+                                            s.pending.clear();
+                                            s.status =
+                                                "Drafts retained · Ctrl+Shift+R to review".into();
+                                            cx.notify();
+                                        }),
+                                    ))
+                                    .child(label)
+                            })),
                     ),
             )
             .child(

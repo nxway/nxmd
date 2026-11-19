@@ -223,3 +223,48 @@ fn unchanged_save_retains_identity_and_rechecks_baseline() -> anyhow::Result<()>
     assert_eq!(fs::read(p)?, b"external");
     Ok(())
 }
+
+#[test]
+fn failed_reads_and_copy_collisions_preserve_original_bytes() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let v = Vault::open(dir.path())?;
+    let name = Path::new("Notes.md");
+    let path = dir.path().join(name);
+    v.save_copy(name, "base")?;
+    let mut doc = v.load(name)?;
+    doc.text = "unsaved".into();
+    fs::write(&path, [0xff, 0xfe])?;
+    assert!(v.load(name).is_err());
+    assert!(v.save_copy(name, &doc.text).is_err());
+    assert!(v.save(&mut doc).is_err());
+    assert_eq!(fs::read(&path)?, [0xff, 0xfe]);
+    fs::remove_file(&path)?;
+    assert!(v.save(&mut doc).is_err());
+    assert!(!path.exists());
+    assert_eq!(doc.baseline(), b"base");
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn locked_replacement_retains_baseline_and_can_be_retried() -> anyhow::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let dir = tempfile::tempdir()?;
+    let v = Vault::open(dir.path())?;
+    let name = Path::new("locked.md");
+    let path = v.root.join(name);
+    v.save_copy(name, "base")?;
+    let mut doc = v.load(name)?;
+    doc.text = "editor".into();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&path)?;
+    assert!(v.save(&mut doc).is_err());
+    assert_eq!(doc.baseline(), b"base");
+    assert_eq!(fs::read(&path)?, b"base");
+    drop(lock);
+    v.save(&mut doc)?;
+    assert_eq!(fs::read(path)?, b"editor");
+    Ok(())
+}

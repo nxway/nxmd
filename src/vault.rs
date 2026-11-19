@@ -19,8 +19,26 @@ pub struct Document {
     pub path: PathBuf,
     pub text: String,
     baseline: Vec<u8>,
+    digest: std::sync::OnceLock<String>,
+}
+impl Document {
+    pub fn baseline_digest(&self) -> &str {
+        self.digest
+            .get_or_init(|| crate::recovery::fingerprint(&self.baseline))
+    }
+    pub fn baseline(&self) -> &[u8] {
+        &self.baseline
+    }
 }
 impl Vault {
+    pub fn save_copy(&self, relative: &Path, text: &str) -> Result<()> {
+        let path = self.resolve(relative)?;
+        let mut temp = tempfile::NamedTempFile::new_in(path.parent().context("Missing parent")?)?;
+        temp.write_all(text.as_bytes())?;
+        temp.as_file().sync_all()?;
+        temp.persist_noclobber(path)?;
+        Ok(())
+    }
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = dunce::canonicalize(root.as_ref())?;
         if !root.is_dir() {
@@ -167,15 +185,12 @@ impl Vault {
             path: path.into(),
             text,
             baseline,
+            digest: Default::default(),
         })
     }
     pub fn save(&self, doc: &mut Document) -> Result<()> {
         let path = self.resolve(&doc.path)?;
-        if fs::read(&path)? != doc.baseline {
-            bail!(
-                "External change detected. Your edits remain in memory; save a copy before reloading."
-            );
-        }
+        self.verify(doc)?;
         if doc.text.as_bytes() == doc.baseline {
             return Ok(());
         }
@@ -186,8 +201,12 @@ impl Vault {
         if fs::read(&path)? != doc.baseline {
             bail!("External change detected during save");
         }
+        #[cfg(windows)]
+        crate::windows_save::commit(&path, temp, &doc.baseline, doc.text.as_bytes())?;
+        #[cfg(not(windows))]
         temp.persist(&path).map_err(|e| e.error)?;
         doc.baseline = doc.text.as_bytes().to_vec();
+        doc.digest.take();
         Ok(())
     }
     /// Move into a newly allocated recovery directory; no destructive deletion.
@@ -216,6 +235,17 @@ impl Vault {
         fs::hard_link(&source, &dest)
             .context("Destination exists or filesystem does not support safe moves")?;
         fs::remove_file(source)?;
+        Ok(())
+    }
+    pub fn verify(&self, doc: &Document) -> Result<()> {
+        let path = self.resolve(&doc.path)?;
+        #[cfg(windows)]
+        crate::windows_save::check_pending(&path)?;
+        let bytes =
+            fs::read(path).with_context(|| format!("Cannot read {}", doc.path.display()))?;
+        if bytes != doc.baseline {
+            bail!("External change detected in {}", doc.path.display())
+        }
         Ok(())
     }
     pub fn changed(&self, doc: &Document) -> bool {

@@ -6,3 +6,7 @@ pub mod vault;
 
 pub mod catalog;
 pub mod images;
+pub mod recovery;
+
+#[cfg(windows)]
+mod windows_save;
