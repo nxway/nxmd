@@ -23,6 +23,13 @@ public static class NativeSmoke {
     [DllImport("user32.dll")] public static extern IntPtr GetOpenClipboardWindow();
     [DllImport("user32.dll")] public static extern bool OpenClipboard(IntPtr owner);
     [DllImport("user32.dll")] public static extern bool CloseClipboard();
+    [StructLayout(LayoutKind.Sequential)] struct ClientPoint { public int X, Y; }
+    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr h,ref ClientPoint p);
+    public static int[] ScreenPoint(IntPtr h,int x,int y) {
+        var p=new ClientPoint { X=x,Y=y };
+        if(!ClientToScreen(h,ref p))throw new InvalidOperationException("Missing native client area");
+        return new[]{p.X,p.Y};
+    }
     public delegate bool EnumProc(IntPtr h, IntPtr p);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -198,6 +205,16 @@ function Select-Path([string]$path, [bool]$folder=$false) {
         Invoke-DialogButton 'Save'
     }
     Wait-DialogClosed
+    if ($folder) {
+        $until=[DateTime]::UtcNow.AddSeconds(15)
+        do {
+            Assert-Alive
+            $snapshot=Read-SmokeSnapshot (Join-Path $config 'session.json')
+            if ($snapshot -and ($snapshot | ConvertFrom-Json).vault -ieq $path) {return}
+            Start-Sleep -Milliseconds 50
+        } while ([DateTime]::UtcNow -lt $until)
+        throw "Vault switch did not persist the selected directory: $path"
+    }
 }
 $previousDiagnostics=$env:NXMD_DIAGNOSTICS
 $env:NXMD_DIAGNOSTICS='verbose'
