@@ -70,6 +70,13 @@ impl Slot {
         })))
     }
     pub fn checkpoint(&self, d: &Draft) -> Result<()> {
+        self.checkpoint_with_sync(d, File::sync_all)
+    }
+    fn checkpoint_with_sync(
+        &self,
+        d: &Draft,
+        sync: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Result<()> {
         let mut s = self
             .0
             .state
@@ -90,7 +97,7 @@ impl Slot {
             )?;
             w.flush()?;
         }
-        temp.as_file().sync_all()?;
+        sync(temp.as_file())?;
         temp.persist(self.0.dir.join("draft.json"))?;
         s.durable = d.generation;
         Ok(())
@@ -266,5 +273,39 @@ fn corrupt_record_does_not_hide_a_valid_draft() -> Result<()> {
     assert_eq!(available[0].draft.text, "valid");
     assert_eq!(warnings.len(), 1);
     assert_eq!(fs::read(bad.join("draft.json"))?, b"{");
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn failed_checkpoint_preserves_the_last_durable_generation() -> Result<()> {
+    let profile = tempfile::tempdir()?;
+    let slot = Slot::new(profile.path())?;
+    let mut draft = Draft {
+        version: 1,
+        vault: profile.path().into(),
+        note: "Note.md".into(),
+        generation: 1,
+        baseline: fingerprint(b""),
+        text: "first".into(),
+        updated: SystemTime::now(),
+    };
+    slot.checkpoint(&draft)?;
+    draft.generation = 2;
+    draft.text = "later".into();
+    let failed = slot.checkpoint_with_sync(&draft, |_| {
+        Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+    });
+    assert!(failed.is_err());
+    drop(slot);
+    let candidate = discover(profile.path())?.0.pop().unwrap();
+    assert_eq!(candidate.draft.generation, 1);
+    assert_eq!(candidate.draft.text, "first");
+    candidate.slot.checkpoint(&draft)?;
+    drop(candidate);
+    assert_eq!(
+        discover(profile.path())?.0.pop().unwrap().draft.text,
+        "later"
+    );
     Ok(())
 }
