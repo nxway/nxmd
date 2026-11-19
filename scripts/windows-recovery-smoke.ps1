@@ -24,7 +24,10 @@ function Stop-RecoveryApp {
 }
 function Read-Draft {
     $files = @(Get-ChildItem (Join-Path $config 'recovery-v1') -Filter draft.json -Recurse -ErrorAction SilentlyContinue)
-    if ($files.Count -eq 1) { return (Get-Content -Raw -LiteralPath $files[0].FullName | ConvertFrom-Json).draft }
+    if ($files.Count -eq 1) {
+        $snapshot=Read-SmokeSnapshot $files[0].FullName
+        if ($null -ne $snapshot) { return ($snapshot | ConvertFrom-Json).draft }
+    }
 }
 function Open-Recovery([string]$expected) {
     Start-RecoveryApp

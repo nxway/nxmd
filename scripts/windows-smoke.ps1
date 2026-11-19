@@ -54,6 +54,12 @@ function Read-SmokeSnapshot([string]$Path, [switch]$Hash) {
     try {
         $stream=[IO.File]::Open($Path,'Open','Read',([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
     } catch [IO.FileNotFoundException] { return $null }
+    catch [IO.IOException] {
+        # ReplaceFileW itself can briefly own an incompatible handle.
+        $code=$_.Exception.GetBaseException().HResult -band 0xffff
+        if ($code -in 32,33) { return $null }
+        throw
+    }
     try {
         if ($Hash) { return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)) }
         $reader=[IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true)
@@ -75,7 +81,7 @@ function Wait-SavedText([string]$Path,[string]$Expected,[string]$Message) {
     $actual=$null
     do {
         Assert-Alive
-         $actual=Read-SmokeSnapshot $Path
+        $actual=Read-SmokeSnapshot $Path
         if ($null -ne $actual -and $actual -ceq $Expected) {
             "$Message verified after $($timer.ElapsedMilliseconds) ms" | Add-Content (Join-Path $resultDir 'input-sync.txt')
             return
