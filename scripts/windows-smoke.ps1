@@ -126,17 +126,42 @@ function Wait-Dialog {
     do { Assert-Alive; $h=[NativeSmoke]::Dialog($process.Id); if ($h -ne [IntPtr]::Zero) { return $h }; Start-Sleep -Milliseconds 100 } until ([DateTime]::UtcNow -gt $until)
     throw 'Expected native dialog did not appear'
 }
+function Wait-SmokeForeground([IntPtr]$Window) {
+    $until=[DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Assert-Alive
+        if ([NativeSmoke]::GetForegroundWindow() -eq $Window) {return}
+        [void][NativeSmoke]::SetForegroundWindow($Window)
+        Start-Sleep -Milliseconds 50
+    } until ([DateTime]::UtcNow -gt $until)
+    throw "Keyboard target never acquired foreground focus; target=$Window foreground=$([NativeSmoke]::GetForegroundWindow())"
+}
 function Wait-DialogClosed {
     $until=[DateTime]::UtcNow.AddSeconds(20)
-    do { Assert-Alive; if ([NativeSmoke]::Dialog($process.Id) -eq [IntPtr]::Zero -and [NativeSmoke]::IsWindowEnabled($mainWindow)) { Start-Sleep -Milliseconds 300; return }; Start-Sleep -Milliseconds 100 } until ([DateTime]::UtcNow -gt $until)
-    throw 'Dialog did not close or left its owner disabled'
+    do {
+        Assert-Alive
+        if ([NativeSmoke]::Dialog($process.Id) -eq [IntPtr]::Zero -and [NativeSmoke]::IsWindowEnabled($mainWindow)) {
+            # Closing the native dialog and clearing GPUI's dialog_busy flag
+            # run on different queues. Observe the current process's callback
+            # before sending a second shortcut to the owner.
+            $logFile=Get-ChildItem (Join-Path $config 'logs') -Filter "*-$($process.Id).log"
+            $events=@($logFile | Select-String -Pattern ' INFO nxmd::ui:\d+ dialog .* (requested|completed)$')
+            $pending=@($events | Where-Object {$_.Line.EndsWith(' requested')}).Count
+            $finished=@($events | Where-Object {$_.Line.EndsWith(' completed')}).Count
+            if ($finished -eq $pending) {
+                Wait-SmokeForeground $mainWindow
+                return
+            }
+        }
+        Start-Sleep -Milliseconds 75
+    } until ([DateTime]::UtcNow -gt $until)
+    throw "Dialog closure did not complete; owner=$mainWindow requested=$pending completed=$finished"
 }
 function Open-Dialog([string]$keys) {
-    [void][NativeSmoke]::SetForegroundWindow($mainWindow)
+    Wait-SmokeForeground $mainWindow
     [System.Windows.Forms.SendKeys]::SendWait($keys)
     $h=Wait-Dialog
-    [void][NativeSmoke]::SetForegroundWindow($h)
-    Start-Sleep -Milliseconds 300
+    Wait-SmokeForeground $h
 }
 function Cancel-Dialog {
     [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
