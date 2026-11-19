@@ -162,6 +162,13 @@ function Open-Dialog([string]$keys) {
     [System.Windows.Forms.SendKeys]::SendWait($keys)
     $h=Wait-Dialog
     Wait-SmokeForeground $h
+    # The shell initializes the dialog's child controls after showing its HWND.
+    $until=[DateTime]::UtcNow.AddSeconds(10)
+    while ([NativeSmoke]::GetDlgItem($h,1) -eq [IntPtr]::Zero) {
+        Assert-Alive
+        if ([DateTime]::UtcNow -gt $until) {throw 'Native dialog confirmation control did not initialize'}
+        Start-Sleep -Milliseconds 50
+    }
 }
 function Cancel-Dialog {
     [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
@@ -227,7 +234,7 @@ try {
     [void][NativeSmoke]::SetForegroundWindow($dialog)
     Start-Sleep -Milliseconds 300
     Select-Path (Join-Path $vault 'Created.md')
-    if (!(Test-Path (Join-Path $vault 'Created.md'))) { throw 'New note dialog did not create the selected file' }
+    Wait-SavedText (Join-Path $vault 'Created.md') '' 'New note dialog did not create an empty file'
     # Edit and select Markdown, then verify undo/redo retain source bytes.
     $created=Join-Path $vault 'Created.md'
     $original='First **bold** note'
