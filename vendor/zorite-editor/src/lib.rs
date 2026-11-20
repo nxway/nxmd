@@ -2892,15 +2892,17 @@ impl EditorState {
                 .any(|e| matches!(e, gpui::ClipboardEntry::ExternalPaths(_)))
         });
         match item.and_then(|i| i.text()).filter(|_| !has_files) {
-            Some(text) => {
-                // Normalize foreign line endings — a Windows/browser copy
-                // carries \r\n (or bare \r), and a literal \r in the buffer
-                // garbles rendering + desyncs the \n-based column math.
-                let mut text = if text.contains('\r') {
-                    text.replace("\r\n", "\n").replace('\r', "\n")
-                } else {
-                    text
-                };
+            Some(mut text) => {
+                // Keep CRLF and LF from the clipboard, including mixed Markdown.
+                // Legacy standalone CRs still represent a line break.
+                let mut offset = 0;
+                while let Some(relative) = text[offset..].find('\r') {
+                    let cr = offset + relative;
+                    offset = cr + 1;
+                    if text.as_bytes().get(offset) != Some(&b'\n') {
+                        text.replace_range(cr..offset, "\n");
+                    }
+                }
                 // Inside a table cell, a raw paste of newlines/pipes would
                 // break the `| … |` row markup (Enter is guarded the same
                 // way): flatten newlines and escape pipes so the paste stays
@@ -2910,6 +2912,7 @@ impl EditorState {
                     // doesn't double up into `\\|` (an escaped backslash
                     // followed by a live separator).
                     text = text
+                        .replace("\r\n", "\n")
                         .trim_end_matches('\n')
                         .replace('\n', " ")
                         .replace("\\|", "|")

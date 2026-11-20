@@ -465,3 +465,24 @@ fn durable_text_excludes_preedit_across_host_edits(cx: &mut gpui::TestAppContext
         assert_eq!(e.selected_range, 0..0);
     });
 }
+
+#[gpui::test]
+fn multiline_paste_preserves_source_endings(cx: &mut gpui::TestAppContext) {
+    with_editor(cx, |e, window, cx| {
+        for (source, expected) in [
+            ("one\r\ntwo\n三", "one\r\ntwo\n三"),
+            ("one\ntwo\r\n三", "one\ntwo\r\n三"),
+            ("one\rtwo\r\n三", "one\ntwo\r\n三"),
+        ] {
+            e.set_text("old", cx);
+            e.select_all(&SelectAll, window, cx);
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(source.to_owned()));
+            e.paste(&Paste, window, cx);
+            assert_eq!(e.text().as_bytes(), expected.as_bytes());
+            e.undo(&Undo, window, cx);
+            assert_eq!(e.text(), "old");
+            e.redo(&Redo, window, cx);
+            assert_eq!(e.text().as_bytes(), expected.as_bytes());
+        }
+    });
+}

@@ -175,6 +175,14 @@ Wait-ImageCondition { [System.Windows.Forms.Clipboard]::GetText() -ceq 'oneX' } 
 [System.Windows.Forms.SendKeys]::SendWait('^s')
 $edited = 'first'+$mixedEnds.Substring(3)
 Wait-SavedText $mixedPath $edited 'Paste over first row retained mixed endings'
+# Cut and paste the full source through CF_UNICODETEXT, including both separator styles.
+[System.Windows.Forms.SendKeys]::SendWait('^a')
+[System.Windows.Forms.SendKeys]::SendWait('^x')
+Wait-ImageCondition { [System.Windows.Forms.Clipboard]::GetText() -ceq $edited } 'Cut changed mixed line endings'
+Wait-SavedText $mixedPath '' 'Cut did not remove the selected text'
+[System.Windows.Forms.SendKeys]::SendWait('^v')
+[System.Windows.Forms.SendKeys]::SendWait('^s')
+Wait-SavedText $mixedPath $edited 'Multiline paste changed mixed line endings'
 [System.Windows.Forms.SendKeys]::SendWait('^w')
 Wait-ImageCondition { (Active-ImagePath) -ne '06 Mixed.md' } 'Mixed fixture did not close'
 Open-EditorFixture 5 '06 Mixed.md'
