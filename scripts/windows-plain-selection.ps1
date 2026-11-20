@@ -58,7 +58,7 @@ Start-Sleep -Milliseconds 400
 $origin=[NativeSmoke]::ScreenPoint($mainWindow,0,0)
 $dpi=[PlainSelection]::GetDpiForWindow($mainWindow)
 $scale=$dpi/96.0
-$area=[Drawing.Rectangle]::new($origin[0]+[int](265*$scale),$origin[1]+[int](100*$scale),[int](300*$scale),[int](250*$scale))
+$area=[Drawing.Rectangle]::new($origin[0]+[int](265*$scale),$origin[1]+[int](100*$scale),[int](550*$scale),[int](340*$scale))
 # Place the caret after the fixture, clear of the three rows' ink.
 [System.Windows.Forms.SendKeys]::SendWait('^{END}')
 if ($TypedBreak) {
@@ -75,12 +75,12 @@ if ($TypedBreak) {
 }
 $frame=Capture-Images "$SelectionEnding-idle.png"
 try { $rows=[PlainSelection]::Ink($frame,$area) } finally {$frame.Dispose()}
-if ($rows.Count -ne 3) { throw "Expected three text rows, observed $($rows.Count) in $area" }
+if (($WrappedMarkdown -and $rows.Count -lt 5) -or (!$WrappedMarkdown -and $rows.Count -ne 3)) { throw "Expected three text rows, observed $($rows.Count) in $area" }
 function GlyphBoundary($Row,$Column,$Length) {
     [Drawing.Point]::new($Row.Left+[int]($Row.Width*$Column/$Length),$Row.Top+[int]($Row.Height/2))
 }
 $first=GlyphBoundary $rows[0] 2 8
-$last=GlyphBoundary $rows[2] 5 7
+$last=GlyphBoundary $rows[-1] 5 7
 $expected=@($fixtureRows[0].Substring(2), '', $fixtureRows[2], $fixtureRows[3], $fixtureRows[4].Substring(0,5)) -join $break
 $errors=@()
 foreach ($direction in 'down','up') {
@@ -92,14 +92,34 @@ foreach ($direction in 'down','up') {
     $copied=[System.Windows.Forms.Clipboard]::GetText()
     $frame=Capture-Images "$SelectionEnding-$direction.png"
     try {
-        $inkY=@($rows | ForEach-Object { $_.Top+[int]($_.Height/2) })
+        # Inline markers can reveal during selection. Observe the selected
+        # frame's ink again when checking wrapped rows.
+        $paintedRows=[PlainSelection]::Ink($frame,$area)
+        if ($paintedRows.Count -ne $rows.Count) { throw 'Text reflowed underneath drag endpoints' }
+        $inkY=@($paintedRows | ForEach-Object { $_.Top+[int]($_.Height/2) })
         # Check that selected text actually has tint. Then scan the full width
         # of each blank visual row at its center, independent of selected ink.
-        $measurements=foreach ($i in 0..4) {
-            $y=if ($i % 2 -eq 0) { $inkY[$i/2] } else { [int](($inkY[($i-1)/2]+$inkY[($i+1)/2])/2) }
+        $checks=@(
+            @{row=0; y=$inkY[0]; left=$first.X; right=$rows[0].Right}
+            @{row=1; y=[int](($inkY[0]+$inkY[1])/2)}
+            for ($k=1;$k -lt $inkY.Count-1;$k++) {
+                @{row=2; y=$inkY[$k]; left=$paintedRows[$k].Left; right=$paintedRows[$k].Right}
+            }
+            @{row=3; y=[int](($inkY[-2]+$inkY[-1])/2)}
+            @{row=4; y=$inkY[-1]; left=$rows[-1].Left; right=$last.X}
+        )
+        $measurements=foreach ($check in $checks) {
+            $i=$check.row
+            $y=$check.y
             $band=[PlainSelection]::TintBounds($frame,[Drawing.Rectangle]::new($area.Left,$y-2,$area.Width,5))
             if ($fixtureRows[$i].Length -eq 0 -and !$band.IsEmpty) { $errors+="Selected pixels on empty row $i ($direction): $band" }
             if ($fixtureRows[$i].Length -gt 0 -and $band.IsEmpty) { $errors+="Missing selection on text row $i ($direction)" }
+            # One trailing word-separator space at a wrap can extend beyond
+            # its last letter. List bullets occupy a separate, unselected gutter.
+            if ($check.ContainsKey('right') -and ([Math]::Abs($band.Right-$check.right) -gt 9*$scale -or
+                ((!$WrappedMarkdown -or $i -ne 2) -and [Math]::Abs($band.Left-$check.left) -gt 5*$scale))) {
+                $errors+="Selection bounds $band disagree with glyphs at row $i ($direction), expected $($check.left)..$($check.right)"
+            }
             @{row=$i; y=$y; x=$band.X; width=$band.Width}
         }
         @{ending=$SelectionEnding;direction=$direction;dpi=$dpi;from="$from";to="$to";source=$text;expected=$expected;clipboard=$copied;bands=$measurements} |

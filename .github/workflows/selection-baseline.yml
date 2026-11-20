@@ -25,6 +25,9 @@ jobs:
             control: -SpaceControl
             label: spaces
           - ending: LF
+            control: -WrappedMarkdown
+            label: wrapped-markdown
+          - ending: LF
             control: -TypedBreak
             label: typed-LF
           - ending: CRLF

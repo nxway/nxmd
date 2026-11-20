@@ -2,11 +2,13 @@ param(
     [Parameter(Mandatory=$true)][string]$Executable,
     [ValidateSet("LF","CRLF")][string]$SelectionEnding,
     [switch]$SpaceControl,
-    [switch]$TypedBreak
+    [switch]$TypedBreak,
+    [switch]$WrappedMarkdown,
+    [string]$ResultDirectory = "smoke-results"
 )
 $ErrorActionPreference = 'Stop'
 $exe = (Resolve-Path $Executable).Path
-$resultDir = New-Item -ItemType Directory -Force smoke-results
+$resultDir = New-Item -ItemType Directory -Force $ResultDirectory
 $root = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
 $vault = New-Item -ItemType Directory -Path (Join-Path $root 'vault') -Force
 $config = New-Item -ItemType Directory -Path (Join-Path $root 'localappdata/nxmd') -Force
@@ -15,6 +17,7 @@ $text = "# Windows smoke test`r`n`r`n**Native** Markdown with 日本語.`r`n"
 if ($SelectionEnding) {
     $break = if ($SelectionEnding -eq 'LF') { "`n" } else { "`r`n" }
     $fixtureRows = @('ММММММММ', '', 'МММ', '', 'МММММММ')
+    if ($WrappedMarkdown) { $fixtureRows[2] = '- **МММ** ' + ('ММММ ' * 16) + 'конец' }
     if ($SpaceControl) { $fixtureRows[3] = '  ' }
     $text = if ($TypedBreak) { $fixtureRows[0..2] -join $break } else { $fixtureRows -join $break }
 }
