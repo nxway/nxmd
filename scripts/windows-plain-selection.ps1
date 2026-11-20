@@ -1,6 +1,6 @@
 # Run via windows-smoke.ps1 -SelectionEnding LF or CRLF. Work in physical
 # screen pixels throughout. Use observed ink to place endpoints between glyphs.
-Add-Type -ReferencedAssemblies @('System.Drawing.Common','System.Drawing.Primitives','System.Runtime.InteropServices') -TypeDefinition @'
+Add-Type -ReferencedAssemblies @('System.Drawing.Common','System.Drawing.Primitives','System.Runtime.InteropServices','System.Threading.Thread') -TypeDefinition @'
 using System;
 using System.Drawing;
 using System.Collections.Generic;
