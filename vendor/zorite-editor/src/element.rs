@@ -175,7 +175,7 @@ impl Element for EditorElement {
                 let scan = editor.scan_data();
                 let shaped = shape_document(
                     window,
-                    &editor.content,
+                    editor,
                     &text_style.font(),
                     text_style.color,
                     font_size,
@@ -411,7 +411,7 @@ impl Element for EditorElement {
         } else {
             shape_document(
                 window,
-                &editor.content,
+                editor,
                 &font,
                 text_color,
                 font_size,
@@ -462,6 +462,14 @@ impl Element for EditorElement {
             line_tops.push(y);
             y += *lh * wrap_rows[idx] as f32 + bot_pad;
         }
+
+        // Include the row straddling the viewport top (it may be wrapped).
+        let first_visible = line_tops
+            .partition_point(|y| *y < -bounds.top())
+            .saturating_sub(1);
+        let past_visible =
+            line_tops.partition_point(|y| *y <= window.viewport_size().height - bounds.top());
+        let visible = first_visible..past_visible;
 
         // Right-to-left rows (#66): direction from the SOURCE line — the same
         // `base_direction` the reader uses, so the two views can never disagree
@@ -707,7 +715,12 @@ impl Element for EditorElement {
         let mut heading_row_rects = Vec::new();
         if editor.markdown_style.is_some() && !editor.content.is_empty() {
             let starts = editor.line_starts();
-            for (i, line_shaped) in wrapped.iter().enumerate() {
+            for (i, line_shaped) in wrapped
+                .iter()
+                .enumerate()
+                .take(visible.end)
+                .skip(visible.start)
+            {
                 // A fence's `# comment` line isn't a heading; folded rows
                 // (height 0, inside an outer fold) can't anchor a chevron.
                 if backgrounds.get(i).and_then(Option::as_ref).is_some() {
@@ -758,7 +771,12 @@ impl Element for EditorElement {
         let mut inline_image_grips = Vec::new();
         if editor.markdown_style.is_some() && !editor.content.is_empty() {
             let starts = editor.line_starts();
-            for (i, line_shaped) in wrapped.iter().enumerate() {
+            for (i, line_shaped) in wrapped
+                .iter()
+                .enumerate()
+                .take(visible.end)
+                .skip(visible.start)
+            {
                 if widgets.get(i).and_then(Option::as_ref).is_some()
                     || backgrounds.get(i).and_then(Option::as_ref).is_some()
                     || tables.get(i).and_then(Option::as_ref).is_some()
@@ -1125,7 +1143,7 @@ impl Element for EditorElement {
             let (s_row, _) = editor.row_col(s);
             let (e_row, _) = editor.row_col(e);
             let mut sels = Vec::new();
-            for row in s_row..=e_row {
+            for row in s_row.max(visible.start)..(e_row + 1).min(visible.end) {
                 let Some(line) = wrapped.get(row) else {
                     continue;
                 };
@@ -1232,9 +1250,18 @@ impl Element for EditorElement {
         // colors — soft yellow everywhere, stronger orange on the active
         // match. Behind the text, like the selection.
         let mut search = Vec::new();
-        if let Some((ranges, active)) = editor.search.as_ref() {
-            for (i, r) in ranges.iter().enumerate() {
-                let color: Hsla = if Some(i) == *active {
+        if let Some(matches) = editor.search.as_ref() {
+            let starts = editor.line_starts();
+            let start = starts
+                .get(visible.start)
+                .copied()
+                .unwrap_or(editor.content.len());
+            let end = starts
+                .get(visible.end)
+                .copied()
+                .unwrap_or(editor.content.len());
+            for (i, r) in matches.visible(start..end) {
+                let color: Hsla = if Some(i) == matches.active {
                     rgba(0xFF9500DD).into()
                 } else {
                     rgba(0xFFD60055).into()
@@ -2657,7 +2684,7 @@ fn shape_inline_images(
 #[allow(clippy::too_many_arguments)]
 fn shape_document(
     window: &mut Window,
-    content: &str,
+    editor: &EditorState,
     base_font: &Font,
     base_color: Hsla,
     base_font_size: Pixels,
@@ -2699,7 +2726,8 @@ fn shape_document(
     folded_headings: &std::collections::HashSet<String>,
 ) -> ShapedDoc {
     let mut out = ShapedDoc::default();
-    let lines: Vec<&str> = content.split('\n').collect();
+    let content = &editor.content;
+    let starts = editor.line_starts();
     // Ordered items paint their computed CommonMark position, not their
     // literal source digits (the reader renumbers the same way).
     let ordered_nums = &scan.ordered;
@@ -2713,7 +2741,7 @@ fn shape_document(
             selection.0.min(selection.1).min(content.len()),
             selection.0.max(selection.1).min(content.len()),
         );
-        let row_of = |off: usize| content[..off].matches('\n').count();
+        let row_of = |off: usize| editor.row_col(off).0;
         row_of(a)..row_of(b) + 1
     });
     let sel_hits = |r: &Range<usize>| {
@@ -2802,7 +2830,7 @@ fn shape_document(
             .cloned()
             .map(|r| {
                 let panel = build_prop_panel(
-                    &lines,
+                    editor,
                     &r,
                     window,
                     base_font,
@@ -2838,7 +2866,7 @@ fn shape_document(
     // fold char), the caret sitting on the heading line itself must not
     // reveal: it's exactly where the caret lands after clicking around a
     // section you then fold.
-    if md.is_some() {
+    if md.is_some() && !folded_headings.is_empty() {
         alert_folds.extend(
             markdown_syntax::heading_fold_regions(content, folded_headings)
                 .into_iter()
@@ -2848,10 +2876,7 @@ fn shape_document(
     // `<!-- math:ALIGN -->` marker lines to hide (revealed only when the caret lands on them),
     // like table style markers.
     let math_marker_lines: Vec<usize> = if md.is_some() {
-        markdown_syntax::math_regions(content)
-            .iter()
-            .filter_map(|r| r.marker_line)
-            .collect()
+        scan.math.iter().filter_map(|r| r.marker_line).collect()
     } else {
         Vec::new()
     };
@@ -2869,8 +2894,8 @@ fn shape_document(
     };
     {
         let mut rk = caches.row_keys.borrow_mut();
-        if rk.0 != row_keys_epoch || rk.1.len() != lines.len() {
-            *rk = (row_keys_epoch, vec![None; lines.len()]);
+        if rk.0 != row_keys_epoch || rk.1.len() != starts.len() {
+            *rk = (row_keys_epoch, vec![None; starts.len()]);
         }
     }
     // Measured column widths, cached across frames: rebuilt only when the
@@ -2907,7 +2932,7 @@ fn shape_document(
                         .iter()
                         .map(|r| {
                             table_column_widths(
-                                &lines,
+                                editor,
                                 r,
                                 window,
                                 base_font,
@@ -2942,23 +2967,23 @@ fn shape_document(
             (Some(hl), Some(_)) => {
                 let mut map = std::collections::HashMap::new();
                 let mut i = 0;
-                while i < lines.len() {
-                    let Some(lang) = lines[i].trim_start().strip_prefix("```") else {
+                while i < starts.len() {
+                    let Some(lang) = editor.line_str(i).trim_start().strip_prefix("```") else {
                         i += 1;
                         continue;
                     };
                     let lang = lang.trim();
                     let mut j = i + 1;
-                    while j < lines.len() && !lines[j].trim_start().starts_with("```") {
+                    while j < starts.len() && !editor.line_str(j).trim_start().starts_with("```") {
                         j += 1;
                     }
                     // Mermaid blocks render as diagrams, not code.
                     if !lang.is_empty() && lang != "mermaid" && j > i + 1 {
-                        let block = lines[i + 1..j].join("\n");
-                        let ranges = hl(lang, &block);
-                        let mut start = 0;
-                        for (k, l) in lines[i + 1..j].iter().enumerate() {
-                            let end = start + l.len();
+                        let block = &content[starts[i + 1]..editor.line_end(j - 1)];
+                        let ranges = hl(lang, block);
+                        for row in i + 1..j {
+                            let start = starts[row] - starts[i + 1];
+                            let end = start + editor.line_str(row).len();
                             let in_line: Vec<(Range<usize>, HighlightStyle)> = ranges
                                 .iter()
                                 .filter_map(|(r, style)| {
@@ -2970,9 +2995,8 @@ fn shape_document(
                                 })
                                 .collect();
                             if !in_line.is_empty() {
-                                map.insert(i + 1 + k, in_line);
+                                map.insert(row, in_line);
                             }
-                            start = end + 1;
                         }
                     }
                     i = j + 1;
@@ -2981,7 +3005,6 @@ fn shape_document(
             }
             _ => std::collections::HashMap::new(),
         };
-    let mut line_start = 0;
     let mut in_fence = false;
     // Active GitHub alert run (`> [!NOTE]` …): set by a marker line, carried
     // while blockquote lines continue, cleared by anything else — so every
@@ -2990,7 +3013,8 @@ fn shape_document(
     let mut list_bodies: Vec<(usize, usize, usize, Pixels)> = Vec::new();
     let mut alert_run: Option<Hsla> = None;
     let mut y_acc = px(0.);
-    for (idx, &line) in lines.iter().enumerate() {
+    for (idx, &line_start) in starts.iter().enumerate() {
+        let line = editor.line_str(idx);
         let line_end = line_start + line.len();
         // Running top of this line — mirrors the prepaint `line_tops` walk
         // (including `line_pads`) so the band test is exact.
@@ -3012,7 +3036,6 @@ fn shape_document(
                 (px(0.), None)
             };
             out.push_placeholder(window, base_font_size, wrap_width, h, widget, None, 1);
-            line_start = line_end + 1;
             alert_run = None;
             continue;
         }
@@ -3024,7 +3047,6 @@ fn shape_document(
         {
             let h = if idx == start_row { gap_h } else { px(0.) };
             out.push_placeholder(window, base_font_size, wrap_width, h, None, None, 1);
-            line_start = line_end + 1;
             alert_run = None;
             continue;
         }
@@ -3038,7 +3060,6 @@ fn shape_document(
                 (px(0.), None)
             };
             out.push_placeholder(window, base_font_size, wrap_width, h, widget, None, 1);
-            line_start = line_end + 1;
             alert_run = None;
             continue;
         }
@@ -3053,7 +3074,6 @@ fn shape_document(
             && let Some(h) = embed_view.and_then(|f| f(inner).map(|(_, h)| h))
         {
             out.push_placeholder(window, base_font_size, wrap_width, h, None, None, 1);
-            line_start = line_end + 1;
             continue;
         }
 
@@ -3065,7 +3085,6 @@ fn shape_document(
             .any(|r| r.contains(&idx) && idx != r.start)
         {
             out.push_placeholder(window, base_font_size, wrap_width, px(0.), None, None, 1);
-            line_start = line_end + 1;
             continue;
         }
 
@@ -3079,7 +3098,6 @@ fn shape_document(
                 (px(0.), None)
             };
             out.push_placeholder(window, base_font_size, wrap_width, h, widget, None, 1);
-            line_start = line_end + 1;
             alert_run = None;
             continue;
         }
@@ -3490,7 +3508,7 @@ fn shape_document(
             }
             None if !is_code && table.is_none() && widget.is_none() && !line.trim().is_empty() => {
                 let ws = line.len() - line.trim_start_matches([' ', '\t']).len();
-                let loose = idx > 0 && lines[idx - 1].trim().is_empty();
+                let loose = idx > 0 && editor.line_str(idx - 1).trim().is_empty();
                 while list_bodies.last().is_some_and(|&(indent, body, _, _)| {
                     ws == 0 || (ws < body && (loose || ws < indent))
                 }) {
@@ -3731,7 +3749,6 @@ fn shape_document(
                             mark,
                             wr_c,
                         );
-                        line_start = line_end + 1;
                         continue;
                     }
                 }
@@ -3978,8 +3995,9 @@ fn shape_document(
                 // the block: a blank line ends it, and there the line above is
                 // what matters (pressing Enter after a Persian paragraph should
                 // keep the caret on the right).
-                None if !line.trim().is_empty() => lines
+                None if !line.trim().is_empty() => starts
                     .get(idx + 1)
+                    .map(|_| editor.line_str(idx + 1))
                     .filter(|next| !next.trim().is_empty())
                     .and_then(|next| zorite_markdown::syntax::content_direction_opt(next))
                     .map_or(last_strong_rtl, |d| d.is_rtl()),
@@ -4023,7 +4041,6 @@ fn shape_document(
                 code_w = code_w.max(line_w);
             }
         }
-        line_start = line_end + 1; // skip the '\n'
     }
     // A code block running to the end of the document: size its box + mark its
     // last line (round the box bottom + pad).
@@ -4043,19 +4060,19 @@ fn shape_document(
     // everything today, but each rebuild re-primes the cache.
     {
         let mut cache = caches.line_runs.borrow_mut();
-        if cache.len() > lines.len() * 2 + 64 {
+        if cache.len() > starts.len() * 2 + 64 {
             cache.clear();
         }
         let mut rows = caches.cell_rows.borrow_mut();
-        if rows.len() > lines.len() * 2 + 64 {
+        if rows.len() > starts.len() * 2 + 64 {
             rows.clear();
         }
         let mut cells = caches.table_cells.borrow_mut();
-        if cells.len() > lines.len() * 2 + 64 {
+        if cells.len() > starts.len() * 2 + 64 {
             cells.clear();
         }
         let mut lh = caches.line_heights.borrow_mut();
-        if lh.len() > lines.len() * 2 + 64 {
+        if lh.len() > starts.len() * 2 + 64 {
             lh.clear();
         }
     }
@@ -4067,7 +4084,7 @@ fn shape_document(
 /// link pills so the panel matches the reader.
 #[allow(clippy::too_many_arguments)]
 fn build_prop_panel(
-    lines: &[&str],
+    editor: &EditorState,
     range: &Range<usize>,
     window: &mut Window,
     font: &Font,
@@ -4092,7 +4109,8 @@ fn build_prop_panel(
     let mut rows = Vec::new();
     let mut key_w = px(0.);
     let mut val_w = px(0.);
-    for &line in &lines[range.start..range.end] {
+    for row in range.clone() {
+        let line = editor.line_str(row);
         let Some((_, k, v)) = zorite_markdown::syntax::prefixed_property(line) else {
             continue;
         };

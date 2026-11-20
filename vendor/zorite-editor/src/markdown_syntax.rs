@@ -2376,7 +2376,7 @@ fn is_word(c: u8) -> bool {
 use zorite_markdown::syntax::is_tag_char as is_tag;
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     #[test]
@@ -3043,7 +3043,7 @@ mod tests {
         assert_eq!(disp, "Notes");
     }
 
-    fn test_style() -> SyntaxStyle {
+    pub(crate) fn test_style() -> SyntaxStyle {
         let c = hsla(0., 0., 0.5, 1.);
         SyntaxStyle {
             block_label: None,

@@ -10,3 +10,5 @@ pub mod recovery;
 
 #[cfg(windows)]
 mod windows_save;
+
+mod note_move;

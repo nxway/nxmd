@@ -3,6 +3,7 @@ param(
     [ValidateSet("LF","CRLF")][string]$SelectionEnding,
     [switch]$SpaceControl,
     [switch]$TypedBreak,
+    [switch]$ImeProbe,
     [switch]$WrappedMarkdown,
     [string]$ResultDirectory = "smoke-results"
 )
@@ -306,6 +307,10 @@ try {
     if (!$process.Responding) { throw 'Native window is not responding to Windows messages' }
     if ((Get-FileHash $note -Algorithm SHA256).Hash -ne $before) { throw 'Opening a note changed its bytes' }
     $mainWindow=$process.MainWindowHandle
+    if ($ImeProbe) {
+        . "$PSScriptRoot/windows-ime-probe.ps1"
+        return
+    }
     if ($SelectionEnding) {
         . "$PSScriptRoot/windows-plain-selection.ps1"
         return

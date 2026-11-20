@@ -267,7 +267,9 @@ impl Workspace {
         match v.load(&path) {
             Ok(doc) => {
                 let editor = cx.new(|cx| {
-                    let mut e = EditorState::new(window, cx).with_text(doc.text.clone());
+                    let mut e = EditorState::new(window, cx)
+                        .with_source_navigation()
+                        .with_text(doc.text.clone());
                     e.set_markdown_style(crate::theme::markdown_style(), cx);
                     let images = self.images.clone();
                     let note = path.clone();
@@ -1001,7 +1003,10 @@ impl Workspace {
                             if !this.save_tab(i, cx) {
                                 return Ok(());
                             }
-                            vault.move_note(&old, &rel)?;
+                            let TabContent::Markdown { doc, .. } = &this.tabs[i].content else {
+                                anyhow::bail!("Source tab is no longer a note");
+                            };
+                            vault.move_document(doc, &rel)?;
                             this.tabs.remove(i);
                             this.active = 0;
                             this.open(rel, window, cx);

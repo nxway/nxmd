@@ -10,6 +10,14 @@ concurrency:
   group: windows-release-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  editor-tests:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Exercise the vendored editor input and projection paths
+        run: cargo test --locked -p zorite-editor --lib
   build:
     runs-on: windows-latest
     timeout-minutes: 90
@@ -45,6 +53,9 @@ jobs:
           path: artifacts/
           if-no-files-found: error
           retention-days: 30
+      - name: Observe native IME composition when the runner has Japanese input
+        shell: pwsh
+        run: ./scripts/windows-smoke.ps1 -Executable ./target/release/nxmd.exe -ImeProbe -ResultDirectory smoke-results/ime
       - name: Native window smoke test
         shell: pwsh
         timeout-minutes: 10

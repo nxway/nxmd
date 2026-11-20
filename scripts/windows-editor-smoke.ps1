@@ -13,6 +13,9 @@ $preservedPath=Join-Path $editorVault '04 Preserved.md'
 $wrappedList='7. '+('A long list item with ordinary words and **formatting** to exercise wrapped navigation. '*10)+"`n8. Second item`n`nAfter."
 $wrappedListPath=Join-Path $editorVault '05 Wrapped.md'
 [IO.File]::WriteAllText($wrappedListPath,$wrappedList,[Text.UTF8Encoding]::new($false))
+$mixedEnds = "one`r`ntwo`n" + 'a$x$b'
+$mixedPath = Join-Path $editorVault '06 Mixed.md'
+[IO.File]::WriteAllText($mixedPath,$mixedEnds,[Text.UTF8Encoding]::new($false))
 $preservedHash=(Get-FileHash $preservedPath).Hash
 function Check-EditorSource([string]$Expected,[string]$Path,[string]$Message) {
     [System.Windows.Forms.Clipboard]::SetText([Guid]::NewGuid().ToString())
@@ -162,6 +165,26 @@ Check-EditorSource $listInserted $wrappedListPath 'List continuation rewrote unr
 [System.Windows.Forms.SendKeys]::SendWait('^z')
 [System.Windows.Forms.SendKeys]::SendWait('^z')
 Check-EditorSource $wrappedList $wrappedListPath 'List structural edit undo'
+Open-EditorFixture 5 '06 Mixed.md'
+[System.Windows.Forms.SendKeys]::SendWait('^{HOME}{END}X^s')
+Wait-SavedText $mixedPath ('oneX'+$mixedEnds.Substring(3)) 'End must insert before both CRLF bytes'
+[System.Windows.Forms.SendKeys]::SendWait('^{HOME}+{END}^c')
+Wait-ImageCondition { [System.Windows.Forms.Clipboard]::GetText() -ceq 'oneX' } 'Shift+End copied a line terminator'
+[System.Windows.Forms.Clipboard]::SetText('first')
+[System.Windows.Forms.SendKeys]::SendWait('^v^s')
+$edited = 'first'+$mixedEnds.Substring(3)
+Wait-SavedText $mixedPath $edited 'Paste over first row retained mixed endings'
+[System.Windows.Forms.SendKeys]::SendWait('^w')
+Wait-ImageCondition { (Active-ImagePath) -ne '06 Mixed.md' } 'Mixed fixture did not close'
+Open-EditorFixture 5 '06 Mixed.md'
+[System.Windows.Forms.SendKeys]::SendWait('^{END}{LEFT 3}Z^s')
+$expected = $edited.Replace('a$x$b','a$Zx$b')
+Wait-SavedText $mixedPath $expected 'Reopened mixed fixture and traversed inline math'
+$encoded = [Text.UTF8Encoding]::new($false).GetBytes($expected)
+if ((Get-FileHash $mixedPath).Hash -ne [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($encoded))) {
+    throw 'Reopened note differs from the expected UTF-8 bytes'
+}
+Open-EditorFixture 4 '05 Wrapped.md'
 # Fixed seed and an independent source string make a failure replayable.
 $rng=[Random]::new(73217)
 $fragments=@(' **bold**',' ~~strike~~',' é',' Привет',' 日本語',' 🙂',' | cell |')

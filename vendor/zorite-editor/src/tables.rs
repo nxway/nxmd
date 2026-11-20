@@ -521,9 +521,7 @@ impl EditorState {
         }
         let starts = self.line_starts();
         let sep_start = starts[sep_row];
-        let sep_end = starts
-            .get(sep_row + 1)
-            .map_or(self.content.len(), |&s| s - 1);
+        let sep_end = self.line_end(sep_row);
         let old_caret = self.cursor_offset();
         let range = sep_start..sep_end;
         self.record_edit(&range, &new_sep);
@@ -570,13 +568,15 @@ impl EditorState {
         } else {
             (row - 1).max(sep)
         };
-        let new_row = format!("\n|{}", "  |".repeat(cols));
+        let eol = self.insertion_eol(after);
+        let new_row = format!("{eol}|{}", "  |".repeat(cols));
         let pos = self.line_end(after);
         let range = pos..pos;
         self.record_edit(&range, &new_row);
         self.content = self.content[..pos].to_owned() + &new_row + &self.content[pos..];
         self.remap_diagnostics(&range, new_row.len());
-        self.selected_range = (pos + 3)..(pos + 3); // first cell, after "\n| "
+        let caret = pos + eol.len() + 2;
+        self.selected_range = caret..caret;
         self.table_menu = None;
         cx.emit(EditorEvent::Changed);
         cx.notify();
@@ -600,9 +600,9 @@ impl EditorState {
         // Remove the line + its trailing newline; for the last line, eat the
         // preceding newline instead so no blank line is left behind.
         let (del_start, del_end) = if line_end < self.content.len() {
-            (start, line_end + 1)
+            (start, self.after_line(row))
         } else {
-            (start.saturating_sub(1), line_end)
+            (self.line_end(row - 1), line_end)
         };
         let range = del_start..del_end;
         self.record_edit(&range, "");
@@ -643,9 +643,16 @@ impl EditorState {
         // Remove the table's lines + the trailing newline; at the document end, eat
         // the preceding newline instead so no blank line is left behind.
         let (del_start, del_end) = if line_end_last < self.content.len() {
-            (starts[first], line_end_last + 1)
+            (starts[first], self.after_line(end - 1))
         } else {
-            (starts[first].saturating_sub(1), line_end_last)
+            (
+                if first == 0 {
+                    0
+                } else {
+                    self.line_end(first - 1)
+                },
+                line_end_last,
+            )
         };
         let range = del_start..del_end;
         self.record_edit(&range, "");
@@ -686,7 +693,7 @@ impl EditorState {
         let line = self.content[starts[row]..self.line_end(row)].to_string();
         // A duplicated header lands below the separator (as a body row).
         let after = if row + 1 == sep { sep } else { row };
-        let insert = format!("\n{line}");
+        let insert = format!("{}{line}", self.insertion_eol(after));
         let pos = self.line_end(after);
         let range = pos..pos;
         self.record_edit(&range, &insert);
@@ -733,11 +740,11 @@ impl EditorState {
         let (range, new) = match (region.marker_line, marker) {
             // Marker present → replace its line, or remove it (with the newline).
             (Some(m), Some(text)) => (starts[m]..self.line_end(m), text),
-            (Some(m), None) => (starts[m]..self.line_end(m) + 1, String::new()),
+            (Some(m), None) => (starts[m]..self.after_line(m), String::new()),
             // No marker → insert one above the header.
             (None, Some(text)) => (
                 starts[region.lines.start]..starts[region.lines.start],
-                format!("{text}\n"),
+                format!("{text}{}", self.insertion_eol(region.lines.start)),
             ),
             (None, None) => return,
         };
@@ -815,8 +822,6 @@ impl EditorState {
             return;
         };
         region.col_widths_attr = None; // natural, content-measured widths
-        let content = self.content.clone();
-        let lines: Vec<&str> = content.split('\n').collect();
         // Measure with the PAINT font — the shaping that lays the table out
         // uses it, and the root font event dispatch reports has different
         // metrics (autofit widths were off by the family drift).
@@ -825,7 +830,7 @@ impl EditorState {
             .clone()
             .unwrap_or_else(|| window.text_style().font());
         let natural = table_column_widths(
-            &lines,
+            self,
             &region,
             window,
             &font,
@@ -897,9 +902,13 @@ impl EditorState {
             .iter()
             .position(|r| line_col <= r.end)
             .unwrap_or(ranges.len().saturating_sub(1));
-        let in_cell = ranges
-            .get(cell)
-            .map_or(0, |r| line_col.saturating_sub(r.start).min(r.len()));
+        let in_cell = ranges.get(cell).map_or(0, |r| {
+            let byte = line_col.saturating_sub(r.start).min(r.len());
+            line[r.clone()]
+                .grapheme_indices(true)
+                .take_while(|(i, _)| *i < byte)
+                .count()
+        });
         Some((row, cell, in_cell))
     }
 
@@ -916,14 +925,20 @@ impl EditorState {
             return row_start;
         }
         let r = &ranges[cell.min(ranges.len() - 1)];
-        // Keep the caret strictly inside the cell, before its closing pipe — an
-        // empty cell's trimmed range collapses onto that pipe (the line end for the
-        // last cell), which would drop the caret out of the rendered table.
-        let bytes = line.as_bytes();
-        let close = (r.end..bytes.len())
-            .find(|&i| bytes[i] == b'|')
-            .unwrap_or(bytes.len());
-        row_start + (r.start + in_cell).min(close.saturating_sub(1))
+        if r.is_empty() {
+            // Blank cells trim to their closing pipe. Prefer the preceding padding.
+            return row_start
+                + if line[..r.start].ends_with(' ') {
+                    r.start - 1
+                } else {
+                    r.start
+                };
+        }
+        let offset = line[r.clone()]
+            .grapheme_indices(true)
+            .nth(in_cell)
+            .map_or(r.len(), |(i, _)| i);
+        row_start + r.start + offset
     }
 
     /// Insert an empty column left/right of the caret's column (a cell added to
@@ -967,10 +982,10 @@ impl EditorState {
         let Some((header, sep, end, _cols)) = self.caret_table_block() else {
             return false;
         };
-        let lines: Vec<&str> = self.content.split('\n').collect();
-        let mut new_rows: Vec<String> = Vec::with_capacity(end - header);
-        for (i, &line) in lines[header..end].iter().enumerate() {
-            let is_sep = header + i == sep;
+        let mut new_block = String::new();
+        for row in header..end {
+            let line = self.line_str(row);
+            let is_sep = row == sep;
             let mut cells: Vec<String> = markdown_syntax::table_cells(line)
                 .iter()
                 .map(|s| (*s).to_string())
@@ -987,12 +1002,14 @@ impl EditorState {
                     cells.remove(c);
                 }
             }
-            new_rows.push(format!("| {} |", cells.join(" | ")));
+            new_block.push_str(&format!("| {} |", cells.join(" | ")));
+            if row + 1 < end {
+                new_block.push_str(&self.content[self.line_end(row)..self.after_line(row)]);
+            }
         }
         let starts = self.line_starts();
         let block_start = starts[header];
         let block_end = self.line_end(end - 1);
-        let new_block = new_rows.join("\n");
         let range = block_start..block_end;
         self.record_edit(&range, &new_block);
         self.content =
@@ -1056,7 +1073,7 @@ fn cell_run_slice(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
 /// while words still fit; otherwise retain a horizontally scrollable grid.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn table_column_widths(
-    lines: &[&str],
+    editor: &EditorState,
     region: &markdown_syntax::TableRegion,
     window: &mut Window,
     base_font: &Font,
@@ -1070,7 +1087,7 @@ pub(crate) fn table_column_widths(
         .lines
         .clone()
         .filter(|&li| li != region.lines.start + 1)
-        .map(|li| markdown_syntax::table_cells(lines[li]).len())
+        .map(|li| markdown_syntax::table_cells(editor.line_str(li)).len())
         .max()
         .unwrap_or(0)
         .max(region.aligns.len())
@@ -1085,7 +1102,7 @@ pub(crate) fn table_column_widths(
         .filter(|&li| li != region.lines.start + 1)
     {
         let font = cell_font(base_font, li == region.lines.start);
-        for (c, source) in markdown_syntax::table_cells(lines[li])
+        for (c, source) in markdown_syntax::table_cells(editor.line_str(li))
             .into_iter()
             .enumerate()
             .take(cols)

@@ -225,17 +225,17 @@ impl Vault {
         fs::rename(source, &dest)?;
         Ok(dest)
     }
-    /// A hard-link followed by unlink provides no-clobber file moves on the same volume.
     pub fn move_note(&self, from: &Path, to: &Path) -> Result<()> {
-        let source = self.resolve(from)?;
-        let dest = self.resolve(to)?;
-        if !source.is_file() {
-            bail!("Only notes can be moved with this operation");
-        }
-        fs::hard_link(&source, &dest)
-            .context("Destination exists or filesystem does not support safe moves")?;
-        fs::remove_file(source)?;
-        Ok(())
+        crate::note_move::move_note(&self.resolve(from)?, &self.resolve(to)?, None)
+    }
+
+    /// Move the saved version the tab expects. Revalidate on the rename handle.
+    pub fn move_document(&self, doc: &Document, to: &Path) -> Result<()> {
+        crate::note_move::move_note(
+            &self.resolve(&doc.path)?,
+            &self.resolve(to)?,
+            Some(doc.baseline()),
+        )
     }
     pub fn verify(&self, doc: &Document) -> Result<()> {
         let path = self.resolve(&doc.path)?;

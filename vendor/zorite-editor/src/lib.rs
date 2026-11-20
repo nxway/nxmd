@@ -778,7 +778,7 @@ pub struct EditorState {
     clipboard_writer: Option<ClipboardWriter>,
     /// Find-in-feed highlights: match byte ranges + the active index, painted
     /// behind the text like the selection. Host-driven ([`Self::set_search`]).
-    search: Option<(Vec<Range<usize>>, Option<usize>)>,
+    search: Option<SearchMatches>,
     /// Last paint's wrapped lines (one per logical line) and each line's top
     /// offset relative to the editor's top — both used for hit-testing and
     /// cursor/IME positioning.
@@ -994,6 +994,8 @@ pub struct EditorState {
     /// Bumped on every content mutation — cheap staleness key for caches
     /// (the UTF-16 conversion anchor below; a shape cache later).
     content_gen: u64,
+    index: std::cell::OnceCell<Vec<usize>>,
+    structural_editors: bool,
     /// Resume point for UTF-8↔UTF-16 conversion: `(generation, utf8, utf16)`
     /// of the last converted offset. IME composition fires conversions many
     /// times per keystroke, clustered near the caret — resuming from the
@@ -1150,6 +1152,8 @@ impl EditorState {
             table_thumb_drag: None,
             grip_inset: px(0.),
             content_gen: 0,
+            index: Default::default(),
+            structural_editors: true,
             utf16_anchor: std::cell::Cell::new((0, 0, 0)),
             editing_block: None,
             inline_math_rects: Vec::new(),
@@ -1168,9 +1172,16 @@ impl EditorState {
 
     /// Builder: start with the given text (caret at the start).
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        self.invalidate_content();
         self.content = normalize_loaded(text.into());
         let caret = caret_off_marker_line(&self.content, 0);
         self.selected_range = caret..caret;
+        self
+    }
+
+    /// Use source editing on entry to math and properties when the host has no popup editors.
+    pub fn with_source_navigation(mut self) -> Self {
+        self.structural_editors = false;
         self
     }
 
@@ -1201,7 +1212,7 @@ impl EditorState {
         while end < len && !self.content.is_char_boundary(end) {
             end += 1;
         }
-        let range = start..end;
+        let range = self.editable_range(start..end);
         self.record_edit(&range, text);
         self.content.replace_range(range.clone(), text);
         self.remap_diagnostics(&range, text.len());
@@ -1216,7 +1227,7 @@ impl EditorState {
 
     /// Replace the whole document; resets the caret to the start.
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
-        self.content_gen += 1;
+        self.invalidate_content();
         self.content = normalize_loaded(text.into());
         // Never park the loaded caret on a collapsed marker line (`<!-- table/
         // math:… -->`): the first focus would reveal it raw mid-interaction.
@@ -1367,7 +1378,7 @@ impl EditorState {
         active: Option<usize>,
         cx: &mut Context<Self>,
     ) {
-        self.search = (!matches.is_empty()).then_some((matches, active));
+        self.search = (!matches.is_empty()).then(|| SearchMatches::new(matches, active));
         cx.notify();
     }
 
@@ -1893,11 +1904,12 @@ impl EditorState {
                     // formula opens from either side.
                     let line_start = self.line_starts()[row];
                     let here = off.saturating_sub(line_start);
-                    let lands_on_a_formula = markdown_syntax::inline_math_spans(self.line_str(row))
-                        .into_iter()
-                        .any(|s| {
-                            line_start + s.start == target && !(s.start < here && here < s.end)
-                        });
+                    let lands_on_a_formula = self.structural_editors
+                        && markdown_syntax::inline_math_spans(self.line_str(row))
+                            .into_iter()
+                            .any(|s| {
+                                line_start + s.start == target && !(s.start < here && here < s.end)
+                            });
                     return if lands_on_a_formula {
                         target + 1
                     } else {
@@ -1924,9 +1936,10 @@ impl EditorState {
             let (trow, _) = self.row_col(target);
             let line_start = self.line_starts()[trow];
             let here = off.saturating_sub(line_start);
-            let lands_on_a_formula = markdown_syntax::inline_math_spans(self.line_str(trow))
-                .into_iter()
-                .any(|s| line_start + s.start == target && !(s.start < here && here < s.end));
+            let lands_on_a_formula = self.structural_editors
+                && markdown_syntax::inline_math_spans(self.line_str(trow))
+                    .into_iter()
+                    .any(|s| line_start + s.start == target && !(s.start < here && here < s.end));
             if lands_on_a_formula {
                 target + 1
             } else {
@@ -2099,7 +2112,8 @@ impl EditorState {
             self.move_to(off, cx);
             return;
         }
-        let off = self.move_vertical(-1);
+        let target = self.move_vertical(-1);
+        let off = self.caret_boundary(target);
         if let Some((range, source)) = self.inline_math_span_at(off) {
             cx.emit(EditorEvent::EditMath {
                 range,
@@ -2143,7 +2157,8 @@ impl EditorState {
             self.move_to(off, cx);
             return;
         }
-        let off = self.move_vertical(1);
+        let target = self.move_vertical(1);
+        let off = self.caret_boundary(target);
         if let Some((range, source)) = self.inline_math_span_at(off) {
             cx.emit(EditorEvent::EditMath {
                 range,
@@ -2452,8 +2467,7 @@ impl EditorState {
             {
                 last += 1;
             }
-            let starts = self.line_starts();
-            let end = starts.get(last + 1).map_or(self.content.len(), |&s| s - 1);
+            let end = self.line_end(last);
             let (range, eol) = line_edit::newline(&self.content, end..end, false, false);
             self.replace_text_in_range(Some(self.range_to_utf16(&range)), &eol, window, cx);
             return;
@@ -2983,7 +2997,7 @@ impl EditorState {
     }
 
     fn restore(&mut self, s: Snapshot) {
-        self.content_gen += 1;
+        self.invalidate_content();
         self.content = s.content;
         let caret = s.caret.min(self.content.len());
         self.selected_range = caret..caret;
@@ -3000,7 +3014,7 @@ impl EditorState {
     /// inserts (or a run of deletes) into one undo step so typing isn't undone
     /// one character at a time.
     fn record_edit(&mut self, range: &Range<usize>, new_text: &str) {
-        self.content_gen += 1;
+        self.invalidate_content();
         let kind = if new_text.is_empty() {
             EditKind::Delete
         } else if range.start == range.end
@@ -3040,6 +3054,9 @@ impl EditorState {
         // The structural LaTeX editor is a WYSIWYG affordance (markdown_style is set only in
         // live-preview mode). In raw-markdown mode the user edits `$$…$$` as plain text, so
         // report no math block here — clicks / arrows / `/math` stay in the text editor.
+        if !self.structural_editors {
+            return None;
+        }
         self.markdown_style.as_ref()?;
         let starts = self.line_starts();
         let blocks = markdown_syntax::math_blocks(&self.content);
@@ -3075,7 +3092,7 @@ impl EditorState {
                 start = prev_start;
             }
         }
-        start..(range.end + 1).min(self.content.len())
+        start..self.after_line(self.row_col(range.end).0)
     }
 
     /// Route a landing offset into an atomic construct the way the plain
@@ -3138,6 +3155,9 @@ impl EditorState {
     /// instead of landing in (and revealing) the raw `key:: value` lines.
     /// WYSIWYG-only, like [`Self::math_block_at`].
     fn property_block_at(&self, row: usize) -> Option<(Range<usize>, SharedString)> {
+        if !self.structural_editors {
+            return None;
+        }
         self.markdown_style.as_ref()?;
         let region = markdown_syntax::property_regions(&self.content)
             .into_iter()
@@ -3151,6 +3171,9 @@ impl EditorState {
     /// as an absolute byte range + inner LaTeX — so arrowing the caret into a formula opens its
     /// structural editor instead of landing in (and revealing) the raw source. WYSIWYG-only.
     fn inline_math_span_at(&self, off: usize) -> Option<(Range<usize>, SharedString)> {
+        if !self.structural_editors {
+            return None;
+        }
         self.markdown_style.as_ref()?;
         let (row, _) = self.row_col(off);
         let line_start = *self.line_starts().get(row)?;
@@ -3799,7 +3822,7 @@ impl EditorState {
         {
             return None; // a chip's line edits as text (reveal-on-caret)
         }
-        Some(start..(end + 1).min(self.content.len()))
+        Some(start..self.after_line(row))
     }
 
     /// Delete the `key:: value` line at `row` (+ its newline) — the panel's
@@ -3809,7 +3832,7 @@ impl EditorState {
         let Some(&start) = self.line_starts().get(row) else {
             return;
         };
-        let end = (self.line_end(row) + 1).min(self.content.len());
+        let end = self.after_line(row);
         self.replace_range(start..end, "", cx);
         cx.emit(EditorEvent::Changed);
     }
@@ -4347,15 +4370,16 @@ impl EditorState {
             } else {
                 starts[t]
             };
-            let after_block = (block_end + 1).min(self.content.len());
+            let after_block = self.after_line(be);
+            let separator = self.insertion_eol(be);
             let mut new = self.content[after_block..target_off].to_string();
             if !new.is_empty() && !new.ends_with('\n') {
-                new.push('\n');
+                new.push_str(separator);
             }
             let rest_len = new.len();
             new.push_str(&block_text);
             if t < n {
-                new.push('\n');
+                new.push_str(separator);
             }
             self.replace_range(block_start..target_off, &new, cx);
             let caret = block_start + rest_len;
@@ -4363,10 +4387,10 @@ impl EditorState {
         } else {
             // Up: [between... block] → [block \n between...]
             let target_off = starts[t];
-            let between = &self.content[target_off..block_start];
+            let between = &self.content[target_off..self.line_end(bs - 1)];
             let mut new = block_text.clone();
-            new.push('\n');
-            new.push_str(&between[..between.len().saturating_sub(1)]);
+            new.push_str(self.insertion_eol(bs - 1));
+            new.push_str(between);
             self.replace_range(target_off..block_end, &new, cx);
             self.selected_range = target_off..target_off;
         }
@@ -4376,6 +4400,7 @@ impl EditorState {
     // --- Selection helpers ---------------------------------------------------
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = self.caret_boundary(offset);
         self.selected_range = offset..offset;
         // A deliberate caret move ends the current typing/deleting run and the
         // vertical-movement goal column.
@@ -4452,6 +4477,7 @@ impl EditorState {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = self.caret_boundary(offset);
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {
@@ -4469,14 +4495,19 @@ impl EditorState {
 
     /// Byte offset where each visual line starts (line 0 starts at 0; each line
     /// after a `\n`). Always has at least one entry.
-    fn line_starts(&self) -> Vec<usize> {
-        let mut starts = vec![0];
-        for (i, b) in self.content.bytes().enumerate() {
-            if b == b'\n' {
-                starts.push(i + 1);
-            }
-        }
-        starts
+    fn line_starts(&self) -> &[usize] {
+        self.index.get_or_init(|| {
+            let mut starts = vec![0];
+            starts.extend(self.content.match_indices('\n').map(|(i, _)| i + 1));
+            starts
+        })
+    }
+
+    fn invalidate_content(&mut self) {
+        self.content_gen += 1;
+        self.index.take();
+        self.shape_memo.get_mut().take();
+        self.search = None;
     }
 
     /// The `(row, byte-column)` of a byte offset.
@@ -4489,11 +4520,42 @@ impl EditorState {
     /// Byte offset of the end of a row's text (before its `\n`, or the document
     /// end for the last row).
     fn line_end(&self, row: usize) -> usize {
-        let starts = self.line_starts();
-        starts
+        let Some(&next) = self.line_starts().get(row + 1) else {
+            return self.content.len();
+        };
+        let lf = next - 1;
+        lf - usize::from(lf > 0 && self.content.as_bytes()[lf - 1] == b'\r')
+    }
+
+    fn after_line(&self, row: usize) -> usize {
+        self.line_starts()
             .get(row + 1)
-            .map(|&s| s - 1)
+            .copied()
             .unwrap_or(self.content.len())
+    }
+
+    fn insertion_eol(&self, row: usize) -> &'static str {
+        let row = if row + 1 == self.line_starts().len() {
+            row.saturating_sub(1)
+        } else {
+            row
+        };
+        if self.after_line(row) - self.line_end(row) == 2 {
+            "\r\n"
+        } else {
+            "\n"
+        }
+    }
+
+    fn caret_boundary(&self, offset: usize) -> usize {
+        let pos = self
+            .content
+            .floor_char_boundary(offset.min(self.content.len()));
+        pos - usize::from(
+            pos > 0
+                && self.content.as_bytes().get(pos) == Some(&b'\n')
+                && self.content.as_bytes()[pos - 1] == b'\r',
+        )
     }
 
     /// Offset one row up/down from the caret, preserving the byte column where
@@ -4806,14 +4868,14 @@ impl EditorState {
         let fence_line = &self.content[start..self.line_end(fence_row)];
         let trimmed = fence_line.trim_start();
         let lang = trimmed.strip_prefix("```")?.trim().to_string();
-        let body_start = (self.line_end(fence_row) + 1).min(self.content.len());
+        let body_start = self.after_line(fence_row);
         let mut body_end = self.content.len();
         for (row, &row_start) in starts.iter().enumerate().skip(fence_row + 1) {
             if self.content[row_start..self.line_end(row)]
                 .trim_start()
                 .starts_with("```")
             {
-                body_end = row_start.saturating_sub(1).max(body_start);
+                body_end = self.line_end(row - 1).max(body_start);
                 break;
             }
         }
@@ -5010,6 +5072,19 @@ impl EditorState {
 
     fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
         self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
+    }
+
+    fn editable_range(&self, range: Range<usize>) -> Range<usize> {
+        let start = self.caret_boundary(range.start);
+        if range.is_empty() {
+            return start..start;
+        }
+        let end = if self.caret_boundary(range.end) < range.end {
+            range.end + 1
+        } else {
+            range.end
+        };
+        start..end
     }
 
     fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
@@ -5211,6 +5286,7 @@ impl EntityInputHandler for EditorState {
             .map(|r| self.range_from_utf16(r))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = self.editable_range(range);
         // Report what this edit replaced (see `last_replaced`) — the fact a
         // diff can't reconstruct when the selection starts with the typed char.
         self.last_replaced =
@@ -5246,7 +5322,8 @@ impl EntityInputHandler for EditorState {
             .map(|r| self.range_from_utf16(r))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        self.content_gen += 1;
+        let range = self.editable_range(range);
+        self.invalidate_content();
         self.content =
             self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.marked_range =
@@ -6806,10 +6883,43 @@ fn checkbox_x(bullet_x: Pixels, size: Pixels, content_width: Pixels, rtl: bool) 
     }
 }
 
+struct SearchMatches {
+    ranges: Vec<Range<usize>>,
+    active: Option<usize>,
+    ordered: bool,
+}
+
+impl SearchMatches {
+    fn new(ranges: Vec<Range<usize>>, active: Option<usize>) -> Self {
+        let ordered = ranges.windows(2).all(|pair| pair[0].end <= pair[1].start);
+        Self {
+            ranges,
+            active,
+            ordered,
+        }
+    }
+
+    fn visible(&self, source: Range<usize>) -> impl Iterator<Item = (usize, &Range<usize>)> {
+        let first = if self.ordered {
+            self.ranges.partition_point(|r| r.end <= source.start)
+        } else {
+            0
+        };
+        self.ranges[first..]
+            .iter()
+            .enumerate()
+            .take_while(move |(_, r)| !self.ordered || r.start < source.end)
+            .filter(move |(_, r)| r.end > source.start && r.start < source.end)
+            .map(move |(i, r)| (first + i, r))
+    }
+}
+
 /// Case-insensitive occurrences of `query` in `content`, as source byte
 /// ranges — the match list a find bar feeds to [`EditorState::set_search`].
 /// Unicode-aware (comparison happens on lowercased text through an index map
-/// back to original byte offsets). An empty query matches nothing.
+/// back to original byte offsets). Matching uses locale-independent per-scalar lowercase,
+/// without normalization or full case folding. A partial lowercase expansion covers the
+/// entire source scalar. An empty query matches nothing.
 pub fn find_in_source(content: &str, query: &str) -> Vec<Range<usize>> {
     let query: String = query.chars().flat_map(char::to_lowercase).collect();
     if query.is_empty() {
@@ -6828,7 +6938,10 @@ pub fn find_in_source(content: &str, query: &str) -> Vec<Range<usize>> {
     }
     lower
         .match_indices(&query)
-        .map(|(i, m)| map[i]..map.get(i + m.len()).copied().unwrap_or(content.len()))
+        .map(|(i, m)| {
+            let last = map[i + m.len() - 1];
+            map[i]..last + content[last..].chars().next().unwrap().len_utf8()
+        })
         .collect()
 }
 
@@ -7405,3 +7518,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod remediation_tests;
