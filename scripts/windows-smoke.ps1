@@ -1,4 +1,7 @@
-param([Parameter(Mandatory=$true)][string]$Executable)
+param(
+    [Parameter(Mandatory=$true)][string]$Executable,
+    [ValidateSet("LF","CRLF")][string]$SelectionEnding
+)
 $ErrorActionPreference = 'Stop'
 $exe = (Resolve-Path $Executable).Path
 $resultDir = New-Item -ItemType Directory -Force smoke-results
@@ -7,6 +10,11 @@ $vault = New-Item -ItemType Directory -Path (Join-Path $root 'vault') -Force
 $config = New-Item -ItemType Directory -Path (Join-Path $root 'localappdata/nxmd') -Force
 $note = Join-Path $vault 'Smoke.md'
 $text = "# Windows smoke test`r`n`r`n**Native** Markdown with 日本語.`r`n"
+if ($SelectionEnding) {
+    $break = if ($SelectionEnding -eq 'LF') { "`n" } else { "`r`n" }
+    $fixtureRows = @('ММММММММ', '', 'МММ', '', 'МММММММ')
+    $text = $fixtureRows -join $break
+}
 [IO.File]::WriteAllText($note, $text, [Text.UTF8Encoding]::new($false))
 $before = (Get-FileHash $note -Algorithm SHA256).Hash
 @{vault=$vault.FullName; tabs=@('Smoke.md'); active=0; recent=@()} | ConvertTo-Json | Set-Content (Join-Path $config 'session.json') -Encoding utf8NoBOM
@@ -292,6 +300,10 @@ try {
     if (!$process.Responding) { throw 'Native window is not responding to Windows messages' }
     if ((Get-FileHash $note -Algorithm SHA256).Hash -ne $before) { throw 'Opening a note changed its bytes' }
     $mainWindow=$process.MainWindowHandle
+    if ($SelectionEnding) {
+        . "$PSScriptRoot/windows-plain-selection.ps1"
+        return
+    }
     # Exercise real native dialogs from GPUI event handlers, including cancel and accept.
     [void][NativeSmoke]::SetForegroundWindow($mainWindow)
     [NativeSmoke]::Click($mainWindow,226,32)
