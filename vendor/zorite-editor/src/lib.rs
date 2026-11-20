@@ -428,16 +428,6 @@ fn strip_block_prefix(line: &str) -> &str {
     line.trim_start()
 }
 
-/// Join `body` lines each carrying the prefix `p(index)` produces — the
-/// assembly half of a "Turn into" conversion.
-fn prefix_lines(body: &[String], p: impl Fn(usize) -> String) -> String {
-    body.iter()
-        .enumerate()
-        .map(|(i, l)| format!("{}{l}", p(i)))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// A column edit applied to every row of a table (insert/delete a cell at index).
 #[derive(Clone, Copy)]
 enum ColEdit {
@@ -4125,14 +4115,14 @@ impl EditorState {
         let scan = self.scan_data();
         let starts = self.line_starts();
         let last_row = starts.len().saturating_sub(1);
-        let line_at = |r: usize| self.content[starts[r]..self.line_end(r)].to_string();
+        let source_line = |r| (r, self.line_str(r));
         // The block's line span + its content with the current dressing removed.
-        let (first, last, mut body): (usize, usize, Vec<String>) = match cur {
+        let (first, last, mut body): (usize, usize, Vec<(usize, &str)>) = match cur {
             TurnKind::Code => {
                 let (open, close) = self.fence_block_rows(row);
                 let last = close.unwrap_or(last_row);
                 let body_end = close.map(|c| c.saturating_sub(1)).unwrap_or(last_row);
-                let body = ((open + 1)..=body_end).map(line_at).collect();
+                let body = ((open + 1)..=body_end).map(source_line).collect();
                 (open, last, body)
             }
             TurnKind::Math => {
@@ -4141,23 +4131,22 @@ impl EditorState {
                 };
                 let first = reg.range.start;
                 let last = reg.range.end.saturating_sub(1).max(first);
-                let body = ((first + 1)..last).map(line_at).collect();
+                let body = ((first + 1)..last).map(source_line).collect();
                 (first, last, body)
             }
             TurnKind::Quote | TurnKind::Callout => {
                 let (first, last) = self.quote_run_rows(row);
                 let body = (first..=last)
                     .filter_map(|r| {
-                        let line = line_at(r);
-                        let stripped = strip_block_prefix(&line);
+                        let stripped = strip_block_prefix(self.line_str(r));
                         // Drop the `[!KIND]` marker token; keep any title text
                         // after it (and skip the line if that leaves nothing).
                         if let Some(rest) = stripped.trim_start().strip_prefix("[!") {
                             let after = rest.split_once(']').map(|(_, a)| a).unwrap_or("");
                             let after = after.trim_start_matches(['-', '+']).trim();
-                            return (!after.is_empty()).then(|| after.to_string());
+                            return (!after.is_empty()).then_some((r, after));
                         }
-                        Some(stripped.to_string())
+                        Some((r, stripped))
                     })
                     .collect();
                 (first, last, body)
@@ -4165,25 +4154,41 @@ impl EditorState {
             _ => (
                 row,
                 row,
-                vec![strip_block_prefix(&line_at(row)).to_string()],
+                vec![(row, strip_block_prefix(self.line_str(row)))],
             ),
         };
         if body.is_empty() {
-            body.push(String::new());
+            body.push((first, ""));
         }
-        let text = match kind {
-            TurnKind::Text => body.join("\n"),
-            TurnKind::H1 => prefix_lines(&body, |_| "# ".into()),
-            TurnKind::H2 => prefix_lines(&body, |_| "## ".into()),
-            TurnKind::H3 => prefix_lines(&body, |_| "### ".into()),
-            TurnKind::Bullet => prefix_lines(&body, |_| "- ".into()),
-            TurnKind::Numbered => prefix_lines(&body, |i| format!("{}. ", i + 1)),
-            TurnKind::Todo => prefix_lines(&body, |_| "- [ ] ".into()),
-            TurnKind::Quote => prefix_lines(&body, |_| "> ".into()),
-            TurnKind::Callout => format!("> [!NOTE]\n{}", prefix_lines(&body, |_| "> ".into())),
-            TurnKind::Code => format!("```\n{}\n```", body.join("\n")),
-            TurnKind::Math => format!("$$\n{}\n$$", body.join("\n")),
+        let mut text = String::new();
+        let fence = match kind {
+            TurnKind::Code => Some("```"),
+            TurnKind::Math => Some("$$"),
+            _ => None,
         };
+        if let Some(open) = fence.or((kind == TurnKind::Callout).then_some("> [!NOTE]")) {
+            text.push_str(open);
+            text.push_str(self.insertion_eol(first));
+        }
+        for (i, &(row, line)) in body.iter().enumerate() {
+            match kind {
+                TurnKind::H1 => text.push_str("# "),
+                TurnKind::H2 => text.push_str("## "),
+                TurnKind::H3 => text.push_str("### "),
+                TurnKind::Bullet => text.push_str("- "),
+                TurnKind::Numbered => text.push_str(&format!("{}. ", i + 1)),
+                TurnKind::Todo => text.push_str("- [ ] "),
+                TurnKind::Quote | TurnKind::Callout => text.push_str("> "),
+                TurnKind::Text | TurnKind::Code | TurnKind::Math => {}
+            }
+            text.push_str(line);
+            if i + 1 < body.len() || fence.is_some() {
+                text.push_str(self.insertion_eol(row));
+            }
+        }
+        if let Some(close) = fence {
+            text.push_str(close);
+        }
         let range = starts[first]..self.line_end(last);
         let range_start = range.start;
         self.selected_range = range;

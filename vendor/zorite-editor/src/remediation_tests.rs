@@ -88,6 +88,34 @@ fn unicode_table_actions(cx: &mut gpui::TestAppContext) {
                         e.text()
                     );
                     assert_eq!(pos, expected);
+                    let expected_rows = match action {
+                        TableMenuAction::DeleteRow => vec![
+                            "| h | j |".into(),
+                            "| --- | --- |".into(),
+                            format!("| {target} | end |"),
+                        ],
+                        TableMenuAction::DeleteColumn => vec![
+                            "| j |".into(),
+                            "| --- |".into(),
+                            format!("| {target} |"),
+                            "| end |".into(),
+                        ],
+                        TableMenuAction::InsertColLeft => vec![
+                            "|  | h | j |".into(),
+                            "| --- | --- | --- |".into(),
+                            format!("|  | abc | {target} |"),
+                            format!("|  | {target} | end |"),
+                        ],
+                        TableMenuAction::InsertRowBelow => vec![
+                            "| h | j |".into(),
+                            "| --- | --- |".into(),
+                            format!("| abc | {target} |"),
+                            "|  |  |".into(),
+                            format!("| {target} | end |"),
+                        ],
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(e.text().as_bytes(), expected_rows.join(eol).as_bytes());
                     let mutated = e.text().to_owned();
                     assert!(eol == "\n" || !mutated.replace("\r\n", "").contains(['\r', '\n']));
                     e.replace_text_in_range(None, "X", w, cx);
@@ -308,5 +336,31 @@ fn forming_a_crlf_does_not_leave_caret_between_its_bytes(cx: &mut gpui::TestAppC
         assert_eq!(e.cursor_offset(), 3);
         e.replace_text_in_range(None, "X", w, cx);
         assert_eq!(e.text().as_bytes(), b"oneX\r\ntwo");
+    });
+}
+
+#[gpui::test]
+fn block_conversion_preserves_internal_terminators(cx: &mut gpui::TestAppContext) {
+    with_editor(cx, |e, w, cx| {
+        e.set_markdown_style(markdown_syntax::tests::test_style(), cx);
+        for (source, kind, expected) in [
+            (
+                "> first\r\n> second\n> third\r\nend",
+                TurnKind::Bullet,
+                "- first\r\n- second\n- third\r\nend",
+            ),
+            ("word\r\nnext", TurnKind::Code, "```\r\nword\r\n```\r\nnext"),
+            (
+                "```rs\r\nfirst\nsecond\r\n```\n",
+                TurnKind::Quote,
+                "> first\n> second\n",
+            ),
+        ] {
+            e.set_text(source, cx);
+            e.turn_into(kind, w, cx);
+            assert_eq!(e.text().as_bytes(), expected.as_bytes());
+            e.undo(&Undo, w, cx);
+            assert_eq!(e.text().as_bytes(), source.as_bytes());
+        }
     });
 }

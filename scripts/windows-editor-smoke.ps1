@@ -171,7 +171,8 @@ Wait-SavedText $mixedPath ('oneX'+$mixedEnds.Substring(3)) 'End must insert befo
 [System.Windows.Forms.SendKeys]::SendWait('^{HOME}+{END}^c')
 Wait-ImageCondition { [System.Windows.Forms.Clipboard]::GetText() -ceq 'oneX' } 'Shift+End copied a line terminator'
 [System.Windows.Forms.Clipboard]::SetText('first')
-[System.Windows.Forms.SendKeys]::SendWait('^v^s')
+[System.Windows.Forms.SendKeys]::SendWait('^v')
+[System.Windows.Forms.SendKeys]::SendWait('^s')
 $edited = 'first'+$mixedEnds.Substring(3)
 Wait-SavedText $mixedPath $edited 'Paste over first row retained mixed endings'
 [System.Windows.Forms.SendKeys]::SendWait('^w')

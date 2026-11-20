@@ -53,9 +53,6 @@ jobs:
           path: artifacts/
           if-no-files-found: error
           retention-days: 30
-      - name: Observe native IME composition when the runner has Japanese input
-        shell: pwsh
-        run: ./scripts/windows-smoke.ps1 -Executable ./target/release/nxmd.exe -ImeProbe -ResultDirectory smoke-results/ime
       - name: Native window smoke test
         shell: pwsh
         timeout-minutes: 10
@@ -84,6 +81,27 @@ jobs:
         if: steps.baseline.outcome == 'success'
         shell: pwsh
         run: ./scripts/windows-performance.ps1 -Baseline ./baseline-release/nxmd.exe -Candidate ./target/release/nxmd.exe
+      - name: Prepare Japanese input on the disposable Windows runner
+        shell: pwsh
+        timeout-minutes: 4
+        continue-on-error: true
+        run: |
+          $language = 'Language.Basic~~~ja-JP~0.0.1.0'
+          try {
+            if ((Get-WindowsCapability -Online -Name $language).State -ne 'Installed') {
+              Add-WindowsCapability -Online -Name $language -ErrorAction Stop | Format-List
+            }
+          } catch { Write-Warning $_ }
+          $languages = Get-WinUserLanguageList
+          if ('ja-JP' -notin $languages.LanguageTag) { $languages.Add('ja-JP') }
+          Set-WinUserLanguageList -LanguageList $languages -Force
+          $profile = (Get-WinUserLanguageList | Where-Object LanguageTag -eq 'ja-JP').InputMethodTips | Select-Object -First 1
+          if ($profile) { Set-WinDefaultInputMethodOverride -InputTip $profile }
+          Get-WinUserLanguageList | Format-List LanguageTag, InputMethodTips
+          Start-Process ctfmon.exe
+      - name: Observe native IME composition when the runner has Japanese input
+        shell: pwsh
+        run: ./scripts/windows-smoke.ps1 -Executable ./target/release/nxmd.exe -ImeProbe -ResultDirectory smoke-results/ime
       - name: Upload smoke-test results
         if: always()
         uses: actions/upload-artifact@v4
