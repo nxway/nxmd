@@ -1203,20 +1203,11 @@ impl EditorState {
     pub fn replace_range(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
         // Snap to char boundaries (start down, end up) so a stale/shifted range — e.g. one
         // captured before a prior formula commit moved the bytes — can't panic mid-UTF-8.
-        let len = self.content.len();
-        let mut start = range.start.min(len);
-        while start > 0 && !self.content.is_char_boundary(start) {
-            start -= 1;
-        }
-        let mut end = range.end.clamp(start, len);
-        while end < len && !self.content.is_char_boundary(end) {
-            end += 1;
-        }
-        let range = self.editable_range(start..end);
+        let range = self.editable_range(range);
         self.record_edit(&range, text);
         self.content.replace_range(range.clone(), text);
         self.remap_diagnostics(&range, text.len());
-        let caret = range.start + text.len();
+        let caret = self.caret_boundary(range.start + text.len());
         self.selected_range = caret..caret;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -2442,14 +2433,12 @@ impl EditorState {
         let (first, _) = self.row_col(self.selected_range.start);
         let (last, _) = self.row_col(self.selected_range.end);
         if self.caret_in_table()
-            && self.table_rows.get(first..=last).is_some_and(|rows| rows.iter().all(Option::is_some))
+            && let Some(region) = self.caret_table_region()
+            && region.lines.contains(&first)
+            && region.lines.contains(&last)
         {
             if let Some(off) = self.table_move_vertical(if hard { -1 } else { 1 })
-                && self
-                    .table_rows
-                    .get(self.row_col(off).0)
-                    .and_then(Option::as_ref)
-                    .is_some_and(|t| !t.is_separator)
+                && region.lines.contains(&self.row_col(off).0)
             {
                 self.move_to(off, cx);
                 return;
@@ -2457,17 +2446,7 @@ impl EditorState {
             if hard {
                 return;
             }
-            let (row, _) = self.row_col(self.cursor_offset());
-            let mut last = row;
-            while self
-                .table_rows
-                .get(last + 1)
-                .and_then(Option::as_ref)
-                .is_some()
-            {
-                last += 1;
-            }
-            let end = self.line_end(last);
+            let end = self.line_end(region.lines.end - 1);
             let (range, eol) = line_edit::newline(&self.content, end..end, false, false);
             self.replace_text_in_range(Some(self.range_to_utf16(&range)), &eol, window, cx);
             return;
@@ -4585,7 +4564,7 @@ impl EditorState {
     /// (x) across the run. Falls back to logical-line movement before the first
     /// paint (when no wrapped layout is cached yet).
     fn move_vertical(&mut self, dir: i32) -> usize {
-        if self.wrapped.is_empty() {
+        if self.last_paint_gen != self.content_gen || self.wrapped.is_empty() {
             return self.vertical_offset(dir);
         }
         let (row, col) = self.row_col(self.cursor_offset());
@@ -4979,10 +4958,13 @@ impl EditorState {
                 break;
             }
         }
+        let Some(&start) = self.line_starts().get(row) else {
+            return self.content.len();
+        };
         // An inline-image row: clicking it puts the caret at the line start (the
         // line then shows its source — "raw on caret"), not a text column.
         if self.widget_rows.get(row).copied().unwrap_or(false) {
-            return self.line_starts()[row];
+            return start;
         }
         // A click on a painted list marker enters its actual source. Clicks
         // on later wraps still target the body. Checkboxes retain their toggle.
@@ -4993,7 +4975,7 @@ impl EditorState {
             && let Some((prefix, indent, ..)) = markdown_syntax::list_prefix(self.line_str(row))
             && self.offset_maps.get(row).and_then(Option::as_ref).is_some_and(|map| map.first() == Some(&prefix))
         {
-            return self.line_starts()[row] + indent;
+            return start + indent;
         }
         let x = (rel.x - self.row_origin_x(row)).max(px(0.));
         let line_rel = point(x, rel.y - self.line_tops[row]);
@@ -5003,7 +4985,7 @@ impl EditorState {
             line_rel,
             self.line_h(row),
         );
-        self.line_starts()[row] + self.source_col(row, col)
+        self.caret_boundary((start + self.source_col(row, col)).min(self.line_end(row)))
     }
 
     /// Map a display byte column on `row` back to its source column. Identity
@@ -5079,11 +5061,10 @@ impl EditorState {
         if range.is_empty() {
             return start..start;
         }
-        let end = if self.caret_boundary(range.end) < range.end {
-            range.end + 1
-        } else {
-            range.end
-        };
+        let end = self
+            .content
+            .ceil_char_boundary(range.end.clamp(start, self.content.len()));
+        let end = end + usize::from(self.caret_boundary(end) < end);
         start..end
     }
 
@@ -5294,7 +5275,7 @@ impl EntityInputHandler for EditorState {
         self.record_edit(&range, new_text);
         self.content =
             self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
-        let caret = range.start + new_text.len();
+        let caret = self.caret_boundary(range.start + new_text.len());
         self.selected_range = caret..caret;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -5341,7 +5322,7 @@ impl EntityInputHandler for EditorState {
                     ..range.start + utf16_to_byte(new_text, r.end)
             })
             .unwrap_or_else(|| {
-                let caret = range.start + new_text.len();
+                let caret = self.caret_boundary(range.start + new_text.len());
                 caret..caret
             });
         self.remap_diagnostics(&range, new_text.len());

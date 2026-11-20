@@ -180,3 +180,133 @@ fn find_window_tracks_source_edits_and_undo(cx: &mut gpui::TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+fn scrolled_highlights_align_with_source_after_edit(cx: &mut gpui::TestAppContext) {
+    struct View {
+        editor: Entity<EditorState>,
+        scroll: ScrollHandle,
+    }
+    impl Render for View {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("viewport")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .child(self.editor.clone())
+        }
+    }
+    let line = "## **row** needle";
+    let source = vec![line; 1024].join("\r\n");
+    let view = cx.open_window(size(px(500.), px(300.)), |w, cx| {
+        let editor = cx.new(|cx| {
+            let mut e = EditorState::new(w, cx).with_text(source);
+            e.set_markdown_style(markdown_syntax::tests::test_style(), cx);
+            e.set_search(find_in_source(e.text(), "needle"), Some(700), cx);
+            e
+        });
+        View {
+            editor,
+            scroll: ScrollHandle::new(),
+        }
+    });
+    let draw = |cx: &mut gpui::TestAppContext| {
+        cx.update_window(view.into(), |_, w, cx| {
+            w.refresh();
+            w.draw(cx).clear(cx);
+        })
+        .unwrap();
+    };
+    draw(cx);
+    view.update(cx, |v, _, cx| {
+        let top = v.editor.read(cx).line_tops[699];
+        v.scroll.set_offset(point(px(0.), -top));
+    })
+    .unwrap();
+    draw(cx);
+    for edited in [false, true] {
+        view.update(cx, |v, w, cx| {
+            let e = v.editor.read(cx);
+            let pos = e.line_end(700) - "needle".len();
+            let at = e.bounds_for_offset(pos).unwrap();
+            let end = e.bounds_for_offset(pos + 6).unwrap();
+            assert!(at.top() >= px(0.) && at.top() < w.viewport_size().height);
+            assert_eq!(
+                e.index_for_mouse_position(at.origin + point(px(0.), px(1.))),
+                pos
+            );
+            let quads = w.painted_quads();
+            let active = quads
+                .iter()
+                .filter(|q| q.background == gpui::Background::from(rgba(0xFF9500DD)))
+                .collect::<Vec<_>>();
+            assert_eq!(active.len(), 1);
+            let expected =
+                Bounds::from_corners(at.origin, end.bottom_right()).scale(w.scale_factor());
+            let painted = active[0].bounds;
+            // GPUI snaps the painted edges to device pixels.
+            for (a, b) in [
+                (painted.left(), expected.left()),
+                (painted.top(), expected.top()),
+                (painted.right(), expected.right()),
+                (painted.bottom(), expected.bottom()),
+            ] {
+                assert!(
+                    (a.as_f32() - b.as_f32()).abs() <= 1.,
+                    "{painted:?} vs {expected:?}"
+                );
+            }
+            let ordinary = quads
+                .iter()
+                .filter(|q| q.background == gpui::Background::from(rgba(0xFFD60055)))
+                .count();
+            assert!((1..30).contains(&ordinary));
+            if !edited {
+                v.editor.update(cx, |e, cx| {
+                    e.replace_range(pos..pos, "字", cx);
+                    e.set_search(find_in_source(e.text(), "needle"), Some(700), cx);
+                });
+            }
+        })
+        .unwrap();
+        draw(cx);
+    }
+}
+
+#[gpui::test]
+fn navigate_before_table_repaint(cx: &mut gpui::TestAppContext) {
+    let source = "| h | j |\r\n| --- | --- |\r\n| abc | q |\r\n| 👩‍💻文 | Ж |";
+    let view = cx.open_window(size(px(500.), px(300.)), |w, cx| {
+        let mut e = EditorState::new(w, cx).with_text(source);
+        e.set_markdown_style(markdown_syntax::tests::test_style(), cx);
+        e.set_cursor(source.find("abc").unwrap() + 1, cx);
+        e
+    });
+    cx.update_window(view.into(), |_, w, cx| {
+        w.draw(cx).clear(cx);
+    })
+    .unwrap();
+    view.update(cx, |e, w, cx| {
+        assert!(e.caret_in_table());
+        TableMenuAction::DeleteRow.apply(e, cx);
+        assert_eq!(e.cursor_offset(), e.text().find('文').unwrap());
+        e.select_down(&SelectDown, w, cx);
+        assert_eq!(e.selected_range.end, e.text().len());
+        e.replace_text_in_range(None, "X", w, cx);
+        assert!(e.text().ends_with("| 👩‍💻X"));
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn forming_a_crlf_does_not_leave_caret_between_its_bytes(cx: &mut gpui::TestAppContext) {
+    with_editor(cx, |e, w, cx| {
+        e.set_text("one\ntwo", cx);
+        e.end(&End, w, cx);
+        e.replace_text_in_range(None, "\r", w, cx);
+        assert_eq!(e.cursor_offset(), 3);
+        e.replace_text_in_range(None, "X", w, cx);
+        assert_eq!(e.text().as_bytes(), b"oneX\r\ntwo");
+    });
+}

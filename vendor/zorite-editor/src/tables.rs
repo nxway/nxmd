@@ -184,8 +184,8 @@ impl EditorState {
 
     /// Source offset at the start of `cell`'s content in table `row` (last paint).
     pub(crate) fn cell_start_offset(&self, row: usize, cell: usize) -> Option<usize> {
-        let t = self.table_rows.get(row).and_then(Option::as_ref)?;
-        Some(self.line_starts()[row] + t.cell_ranges.get(cell)?.start)
+        let cells = self.navigation_cells(row)?;
+        Some(*self.line_starts().get(row)? + cells.get(cell)?.start)
     }
 
     /// If `position` lands on a table grid row (not the separator), the source
@@ -197,7 +197,10 @@ impl EditorState {
         position: Point<Pixels>,
         window: &mut Window,
     ) -> Option<usize> {
-        if self.wrapped.is_empty() || self.table_rows.iter().all(Option::is_none) {
+        if self.last_paint_gen != self.content_gen
+            || self.wrapped.is_empty()
+            || self.table_rows.iter().all(Option::is_none)
+        {
             return None;
         }
         let bounds = self.last_bounds.as_ref()?;
@@ -268,15 +271,42 @@ impl EditorState {
     /// separator) — so Tab navigates cells instead of indenting.
     pub(crate) fn caret_in_table(&self) -> bool {
         let (row, _) = self.row_col(self.cursor_offset());
-        self.table_rows
-            .get(row)
-            .and_then(Option::as_ref)
-            .is_some_and(|t| !t.is_separator)
+        self.navigation_cells(row)
+            .is_some_and(|cells| !cells.is_empty())
+    }
+
+    /// Current source columns for keyboard input. A table action can be followed
+    /// by more input before the next paint. An empty slice denotes the separator.
+    fn navigation_cells(&self, row: usize) -> Option<std::borrow::Cow<'_, [Range<usize>]>> {
+        use std::borrow::Cow;
+        if self.content_gen == self.last_paint_gen {
+            let t = self.table_rows.get(row)?.as_ref()?;
+            return Some(Cow::Borrowed(if t.is_separator {
+                &[]
+            } else {
+                &t.cell_ranges
+            }));
+        }
+        self.markdown_style.as_ref()?;
+        let line = self.line_str(row);
+        if !markdown_syntax::is_table_row(line) {
+            return None;
+        }
+        let scan = self.scan_data();
+        let region = scan.tables.iter().find(|r| r.lines.contains(&row))?;
+        if row == region.lines.start + 1 {
+            Some(Cow::Borrowed(&[]))
+        } else {
+            Some(Cow::Owned(markdown_syntax::table_cell_ranges(line)))
+        }
     }
 
     /// Move within a wrapped cell before crossing to the adjacent table row.
     /// Use the same projected runs and alignment as paint and pointer hits.
     pub(crate) fn table_move_visual(&self, dir: i32, window: &mut Window) -> Option<usize> {
+        if self.content_gen != self.last_paint_gen {
+            return self.table_move_vertical(dir);
+        }
         let (row, col) = self.row_col(self.cursor_offset());
         let table = self.table_rows.get(row).and_then(Option::as_ref)?;
         if table.is_separator {
@@ -319,12 +349,9 @@ impl EditorState {
     /// leave the table — the caller then does a normal vertical move (exiting it).
     pub(crate) fn table_move_vertical(&self, dir: i32) -> Option<usize> {
         let (row, col) = self.row_col(self.cursor_offset());
-        let t = self.table_rows.get(row).and_then(Option::as_ref)?;
-        if t.is_separator || t.cell_ranges.is_empty() {
-            return None;
-        }
-        let cell = table_cell_at(t, col);
-        let intra = col.saturating_sub(t.cell_ranges[cell].start);
+        let cells = self.navigation_cells(row)?;
+        let cell = table_cell_at(&cells, col);
+        let intra = col.saturating_sub(cells.get(cell)?.start);
         let starts = self.line_starts();
         let mut r = row as isize + dir as isize;
         loop {
@@ -332,22 +359,25 @@ impl EditorState {
                 return None;
             }
             let ru = r as usize;
-            match self.table_rows.get(ru) {
-                Some(Some(nt)) if !nt.is_separator && !nt.cell_ranges.is_empty() => {
-                    let tc = cell.min(nt.cell_ranges.len() - 1);
-                    let cr = &nt.cell_ranges[tc];
-                    let mut target = starts[ru] + cr.start + intra.min(cr.len());
-                    while !self.content.is_char_boundary(target) {
-                        target -= 1;
-                    }
-                    return Some(target);
+            let &row_start = starts.get(ru)?;
+            match self.navigation_cells(ru) {
+                Some(cells) if !cells.is_empty() => {
+                    let r = &cells[cell.min(cells.len() - 1)];
+                    let text = &self.line_str(ru)[r.clone()];
+                    let byte = intra.min(r.len());
+                    let offset = if byte == r.len() {
+                        byte
+                    } else {
+                        text.grapheme_indices(true)
+                            .map(|(i, _)| i)
+                            .take_while(|&i| i <= byte)
+                            .last()
+                            .unwrap_or(0)
+                    };
+                    return Some(row_start + r.start + offset);
                 }
-                Some(Some(_)) => r += dir as isize, // separator — skip past it
-                // A non-table row next to the table: exit onto it at the same byte
-                // column (clamped to a char boundary). Done here rather than via
-                // `move_vertical`, whose handling of the table's top gutter would
-                // otherwise trap an upward exit back onto the header row.
-                Some(None) => {
+                Some(_) => r += dir as isize,
+                None => {
                     let end = self.line_end(ru);
                     // Skip the table's own `<!-- table:STYLE -->` style-marker line
                     // (a hidden directive) so an upward exit lands on real content,
@@ -363,7 +393,6 @@ impl EditorState {
                     }
                     return Some(target);
                 }
-                None => return None, // past the document edge — let move_vertical exit
             }
         }
     }
@@ -374,92 +403,61 @@ impl EditorState {
     /// `None` when the caret isn't in a table cell or the move would leave it.
     pub(crate) fn table_move_horizontal(&self, dir: i32) -> Option<usize> {
         let (row, col) = self.row_col(self.cursor_offset());
-        let t = self.table_rows.get(row).and_then(Option::as_ref)?;
-        if t.is_separator || t.cell_ranges.is_empty() {
-            return None;
-        }
-        let cell = table_cell_at(t, col);
-        let starts = self.line_starts();
+        let cells = self.navigation_cells(row)?;
+        let cell = table_cell_at(&cells, col);
+        let range = cells.get(cell)?;
+        let start = self.line_starts()[row];
         let cur = self.cursor_offset();
-        let cell_start = starts[row] + t.cell_ranges[cell].start;
-        let cell_end = starts[row] + t.cell_ranges[cell].end;
-        if dir > 0 {
-            if cur < cell_end {
-                return Some(self.next_boundary(cur).min(cell_end));
-            }
-            if cell + 1 < t.cell_ranges.len() {
-                return Some(starts[row] + t.cell_ranges[cell + 1].start);
-            }
-            // Last cell of the row → first cell of the next table row, else exit.
-            for (r, slot) in self.table_rows.iter().enumerate().skip(row + 1) {
-                match slot.as_ref() {
-                    Some(nt) if !nt.is_separator && !nt.cell_ranges.is_empty() => {
-                        return Some(starts[r] + nt.cell_ranges[0].start);
-                    }
-                    Some(_) => continue,
-                    None => break,
-                }
-            }
-            None
+        if dir > 0 && col < range.end {
+            return Some(self.next_boundary(cur).min(start + range.end));
+        }
+        if dir < 0 && col > range.start {
+            return Some(self.previous_boundary(cur).max(start + range.start));
+        }
+        self.adjacent_table_cell(row, cell, dir > 0, dir < 0)
+    }
+
+    fn adjacent_table_cell(
+        &self,
+        mut row: usize,
+        cell: usize,
+        forward: bool,
+        at_end: bool,
+    ) -> Option<usize> {
+        let current = self.navigation_cells(row)?;
+        let neighbor = if forward {
+            cell.checked_add(1)
         } else {
-            if cur > cell_start {
-                return Some(self.previous_boundary(cur).max(cell_start));
+            cell.checked_sub(1)
+        };
+        if let Some(r) = neighbor.and_then(|i| current.get(i)) {
+            return Some(self.line_starts()[row] + if at_end { r.end } else { r.start });
+        }
+        loop {
+            row = if forward {
+                row.checked_add(1)?
+            } else {
+                row.checked_sub(1)?
+            };
+            let cells = self.navigation_cells(row)?;
+            if let Some(r) = if forward { cells.first() } else { cells.last() } {
+                return Some(self.line_starts()[row] + if at_end { r.end } else { r.start });
             }
-            if cell > 0 {
-                return Some(starts[row] + t.cell_ranges[cell - 1].end);
-            }
-            // First cell of the row → last cell of the previous table row, else exit.
-            for (r, slot) in self.table_rows.iter().enumerate().take(row).rev() {
-                match slot.as_ref() {
-                    Some(pt) if !pt.is_separator && !pt.cell_ranges.is_empty() => {
-                        return Some(starts[r] + pt.cell_ranges[pt.cell_ranges.len() - 1].end);
-                    }
-                    Some(_) => continue,
-                    None => break,
-                }
-            }
-            None
         }
     }
 
-    /// Target source offset to move the caret to the next (`forward`) / previous
-    /// table cell, crossing rows (skipping the separator). Stays put at the table's
-    /// final/first cell. `None` when the caret isn't in a table cell.
+    /// Tab moves to the adjacent cell start, staying in place at either table edge.
     pub(crate) fn table_cell_nav(&self, forward: bool) -> Option<usize> {
         let (row, col) = self.row_col(self.cursor_offset());
-        let t = self.table_rows.get(row).and_then(Option::as_ref)?;
-        if t.is_separator {
+        let cells = self.navigation_cells(row)?;
+        if cells.is_empty() {
             return None;
         }
-        let cell = table_cell_at(t, col);
-        let starts = self.line_starts();
-        let usable = |tr: &TableRow| !tr.is_separator && !tr.cell_ranges.is_empty();
-        if forward {
-            if cell + 1 < t.cell_ranges.len() {
-                return Some(starts[row] + t.cell_ranges[cell + 1].start);
-            }
-            for (r, slot) in self.table_rows.iter().enumerate().skip(row + 1) {
-                match slot.as_ref() {
-                    Some(nt) if usable(nt) => return Some(starts[r] + nt.cell_ranges[0].start),
-                    Some(_) => continue,
-                    None => break,
-                }
-            }
-        } else {
-            if cell > 0 {
-                return Some(starts[row] + t.cell_ranges[cell - 1].start);
-            }
-            for (r, slot) in self.table_rows.iter().enumerate().take(row).rev() {
-                match slot.as_ref() {
-                    Some(pt) if usable(pt) => {
-                        return Some(starts[r] + pt.cell_ranges[pt.cell_ranges.len() - 1].start);
-                    }
-                    Some(_) => continue,
-                    None => break,
-                }
-            }
-        }
-        Some(self.cursor_offset()) // at the boundary — no-op move (don't indent)
+        let cell = table_cell_at(&cells, col);
+        Some(
+            self.adjacent_table_cell(row, cell, forward, false)
+                .unwrap_or(self.cursor_offset()),
+        )
     }
 
     /// The alignment of the table column the caret sits in — but only while the
@@ -474,7 +472,7 @@ impl EditorState {
         if !t.is_header {
             return None;
         }
-        let cell = table_cell_at(t, col);
+        let cell = table_cell_at(&t.cell_ranges, col);
         let scan = self.scan_data();
         let region = scan.tables.iter().find(|r| r.lines.contains(&row))?;
         Some(match region.aligns.get(cell) {
@@ -494,7 +492,7 @@ impl EditorState {
         if t.is_separator {
             return;
         }
-        let cell = table_cell_at(t, col);
+        let cell = table_cell_at(&t.cell_ranges, col);
         // Read the table's columns from the current content (fresh), so repeated
         // clicks build on the latest alignment, not a stale painted snapshot.
         let scan = self.scan_data();
@@ -888,7 +886,7 @@ impl EditorState {
         self.rewrite_table_marker(&region, marker, cx);
     }
 
-    /// The caret's table position as `(row, cell_index, offset_within_cell)`, or
+    /// The caret's table position as `(row, cell_index, grapheme_index)`, or
     /// `None` outside a table. Lets structural edits keep the caret put.
     pub(crate) fn caret_table_cell_pos(&self) -> Option<(usize, usize, usize)> {
         let (row, _) = self.row_col(self.cursor_offset());
@@ -898,10 +896,7 @@ impl EditorState {
         let line = &self.content[row_start..self.line_end(row)];
         let line_col = self.cursor_offset() - row_start;
         let ranges = markdown_syntax::table_cell_ranges(line);
-        let cell = ranges
-            .iter()
-            .position(|r| line_col <= r.end)
-            .unwrap_or(ranges.len().saturating_sub(1));
+        let cell = table_cell_at(&ranges, line_col);
         let in_cell = ranges.get(cell).map_or(0, |r| {
             let byte = line_col.saturating_sub(r.start).min(r.len());
             line[r.clone()]
@@ -912,7 +907,7 @@ impl EditorState {
         Some((row, cell, in_cell))
     }
 
-    /// Byte offset of `(row, cell, offset_within_cell)` in the current content,
+    /// Source byte offset of `(row, cell, grapheme_index)` in the current content,
     /// clamping the cell + offset to what that row actually has.
     pub(crate) fn caret_pos_for_cell(&self, row: usize, cell: usize, in_cell: usize) -> usize {
         let starts = self.line_starts();
@@ -1288,11 +1283,11 @@ pub(crate) fn table_row_wrap_rows(
 
 /// The cell a source column `col` (line-local) falls in for a table row — clamped
 /// to the nearest cell when `col` is in a pipe/space between cells.
-fn table_cell_at(t: &TableRow, col: usize) -> usize {
-    t.cell_ranges
+fn table_cell_at(cells: &[Range<usize>], col: usize) -> usize {
+    cells
         .iter()
         .position(|r| col <= r.end)
-        .unwrap_or(t.cell_ranges.len().saturating_sub(1))
+        .unwrap_or(cells.len().saturating_sub(1))
 }
 
 /// Screen position of the caret at source column `col` (line-local) inside a
@@ -1310,7 +1305,7 @@ pub(crate) fn table_caret_pos(
         return None;
     }
     let pad = px(TABLE_CELL_PAD);
-    let cell = table_cell_at(t, col);
+    let cell = table_cell_at(&t.cell_ranges, col);
     let range = t.cell_ranges.get(cell)?;
     let content = t.projected.get(cell)?;
     let in_cell = col.saturating_sub(range.start).min(range.len());

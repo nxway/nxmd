@@ -268,3 +268,29 @@ fn locked_replacement_retains_baseline_and_can_be_retried() -> anyhow::Result<()
     assert_eq!(fs::read(path)?, b"editor");
     Ok(())
 }
+
+#[test]
+fn move_uses_the_file_selected_before_the_dialog() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let vault = Vault::open(dir.path())?;
+    let src = Path::new("picked.md");
+    let dest = Path::new("moved.md");
+    fs::write(vault.resolve(src)?, b"original\r\n")?;
+    let doc = vault.load(src)?;
+    let picked = vault.open_move_source(src)?;
+    fs::rename(vault.resolve(src)?, dir.path().join("external-backup.md"))?;
+    fs::write(vault.resolve(src)?, b"newest\n")?;
+    assert!(vault.move_document(&doc, &picked, dest).is_err());
+    assert_eq!(doc.text.as_bytes(), b"original\r\n");
+    assert_eq!(fs::read(vault.resolve(src)?)?, b"newest\n");
+    assert!(!vault.resolve(dest)?.exists());
+    let fresh = vault.load(src)?;
+    vault.move_document(&fresh, &vault.open_move_source(src)?, dest)?;
+    assert!(!vault.resolve(src)?.exists());
+    assert_eq!(fs::read(vault.resolve(dest)?)?, b"newest\n");
+    assert_eq!(
+        fs::read(dir.path().join("external-backup.md"))?,
+        b"original\r\n"
+    );
+    Ok(())
+}

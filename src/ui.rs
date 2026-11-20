@@ -1,6 +1,5 @@
 use crate::image_store::{ImageStore, Key as ImageKey, State as ImageState};
 use anyhow::Context as _;
-use crate::image_store::{ImageStore, Key as ImageKey, State as ImageState};
 use gpui::*;
 use nxmd::{
     config::Session,
@@ -948,9 +947,9 @@ impl Workspace {
             return;
         }
         let old = tab.map(|t| t.path.clone());
-        let original = if let (NewPath::Move, Some(path)) = (kind, &old) {
-            match vault.open_move_source(path) {
-                Ok(file) => Some(file),
+        let original = if let (NewPath::Move, Some(tab)) = (kind, tab) {
+            match vault.open_move_source(&tab.path) {
+                Ok(file) => Some((file, tab.editor().unwrap().clone(), tab.generation)),
                 Err(error) => {
                     self.status = format!("Cannot open source for move: {error}");
                     cx.notify();
@@ -961,6 +960,7 @@ impl Workspace {
             None
         };
         let text = tab
+            .filter(|_| matches!(kind, NewPath::Copy))
             .and_then(Tab::editor)
             .map(|e| e.read(cx).text().to_owned())
             .unwrap_or_default();
@@ -1008,23 +1008,25 @@ impl Workspace {
                             this.open(rel, window, cx);
                         }
                         NewPath::Move => {
-                            let old = old.unwrap();
+                            let (file, original_editor, generation) =
+                                original.as_ref().context("Missing move source")?;
                             let i = this
                                 .tabs
                                 .iter()
-                                .position(|t| t.path == old)
-                                .ok_or_else(|| anyhow::anyhow!("Source tab closed"))?;
-                            if !this.save_tab(i, cx) {
-                                return Ok(());
-                            }
-                            let TabContent::Markdown { doc, .. } = &this.tabs[i].content else {
+                                .position(|t| t.editor() == Some(original_editor))
+                                .context("Source tab closed")?;
+                            let tab = &this.tabs[i];
+                            let TabContent::Markdown { doc, editor, .. } = &tab.content else {
                                 anyhow::bail!("Source tab is no longer a note");
                             };
-                            vault.move_document(
-                                doc,
-                                original.as_ref().context("Missing move source")?,
-                                &rel,
-                            )?;
+                            // The entry to Move already saved this generation. Never
+                            // save again over a file replaced during the picker.
+                            anyhow::ensure!(
+                                tab.generation == *generation
+                                    && editor.read(cx).text().as_bytes() == doc.baseline(),
+                                "Note changed while choosing the destination. Retry Move."
+                            );
+                            vault.move_document(doc, file, &rel)?;
                             this.tabs.remove(i);
                             this.active = 0;
                             this.open(rel, window, cx);

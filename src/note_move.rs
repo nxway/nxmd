@@ -16,6 +16,11 @@ fn transact(
     expected: Option<(&fs::File, &[u8])>,
     before_rename: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
+    #[cfg(windows)]
+    {
+        crate::windows_save::check_pending(source)?;
+        crate::windows_save::check_pending(dest)?;
+    }
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(windows)]
