@@ -15,6 +15,7 @@ $vault = New-Item -ItemType Directory -Path (Join-Path $root 'vault') -Force
 $config = New-Item -ItemType Directory -Path (Join-Path $root 'localappdata/nxmd') -Force
 $note = Join-Path $vault 'Smoke.md'
 $text = "# Windows smoke test`r`n`r`n**Native** Markdown with 日本語.`r`n"
+if ($ImeProbe) { $text = 'Original 選択' }
 if ($SelectionEnding) {
     $break = if ($SelectionEnding -eq 'LF') { "`n" } else { "`r`n" }
     $fixtureRows = @('ММММММММ', '', 'МММ', '', 'МММММММ')

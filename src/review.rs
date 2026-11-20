@@ -161,7 +161,7 @@ impl Review {
         let mut d = self.draft.clone();
         d.generation = self.generation;
         d.updated = SystemTime::now();
-        d.text = self.editor.read(cx).text().into();
+        d.text = self.editor.read(cx).committed_text().into();
         match self.slot.checkpoint(&d) {
             Ok(()) => {
                 self.draft = d;

@@ -277,12 +277,18 @@ struct ImageResize {
     width: f32,
 }
 
-/// A restorable editor state, for undo/redo. Stores the caret offset (not a
-/// selection), so undo/redo place the caret rather than re-selecting text.
+/// Ordinary edits store a collapsed caret. An IME transaction keeps the
+/// selection it replaced, including its direction, for cancel and Undo.
 #[derive(Clone)]
 struct Snapshot {
     content: String,
-    caret: usize,
+    selection: Range<usize>,
+    reversed: bool,
+}
+
+struct Composition {
+    before: Snapshot,
+    replaced: Range<usize>,
 }
 
 /// The last edit's kind, for coalescing a run of edits into one undo step.
@@ -763,6 +769,7 @@ pub struct EditorState {
     selection_reversed: bool,
     /// IME composition range, if any.
     marked_range: Option<Range<usize>>,
+    composition: Option<Composition>,
     /// Host-supplied clipboard writer for Copy/Cut (e.g. adding an HTML
     /// flavor beside the plain text). `None` = gpui's plain-string copy.
     clipboard_writer: Option<ClipboardWriter>,
@@ -1059,14 +1066,22 @@ struct EditingInline {
 }
 
 impl EditorState {
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        cx.on_blur(&focus_handle, window, |editor, _, cx| {
+            if editor.cancel_composition() {
+                cx.notify();
+            }
+        })
+        .detach();
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             content: String::new(),
             placeholder: SharedString::default(),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
+            composition: None,
             clipboard_writer: None,
             search: None,
             wrapped: Vec::new(),
@@ -1186,6 +1201,46 @@ impl EditorState {
         &self.content
     }
 
+    /// The source available for save, export or recovery while IME text is displayed.
+    pub fn committed_text(&self) -> &str {
+        self.composition
+            .as_ref()
+            .map_or(&self.content, |c| &c.before.content)
+    }
+
+    /// Map an edit of the displayed preedit back into the committed source.
+    /// Replacing any part of it targets the original selected characters.
+    fn committed_range(&self, range: Range<usize>) -> Range<usize> {
+        let (Some(c), Some(marked)) = (&self.composition, &self.marked_range) else {
+            return range;
+        };
+        let map = |pos, inside| {
+            if pos <= marked.start {
+                pos
+            } else if pos >= marked.end {
+                c.replaced.end + (pos - marked.end)
+            } else {
+                inside
+            }
+        };
+        let start = map(range.start, c.replaced.start);
+        if range.is_empty() {
+            start..start
+        } else {
+            start..map(range.end, c.replaced.end)
+        }
+    }
+
+    fn cancel_composition(&mut self) -> bool {
+        if let Some(c) = self.composition.take() {
+            self.restore(c.before);
+            self.last_edit = EditKind::Other;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Replace byte `range` with `text` as ONE recorded (undoable) edit, leaving the caret
     /// after the inserted text. Unlike [`Self::set_text`] this preserves — and extends — the
     /// undo history, so a host writing back a structural edit (e.g. a committed `$$…$$`
@@ -1194,6 +1249,8 @@ impl EditorState {
         // Snap to char boundaries (start down, end up) so a stale/shifted range — e.g. one
         // captured before a prior formula commit moved the bytes — can't panic mid-UTF-8.
         let range = self.editable_range(range);
+        let range = self.committed_range(range);
+        self.cancel_composition();
         self.record_edit(&range, text);
         self.content.replace_range(range.clone(), text);
         self.remap_diagnostics(&range, text.len());
@@ -1208,6 +1265,7 @@ impl EditorState {
 
     /// Replace the whole document; resets the caret to the start.
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.composition = None;
         self.invalidate_content();
         self.content = normalize_loaded(text.into());
         // Never park the loaded caret on a collapsed marker line (`<!-- table/
@@ -2937,6 +2995,10 @@ impl EditorState {
     // --- Undo / redo ---------------------------------------------------------
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.cancel_composition() {
+            cx.notify();
+            return;
+        }
         if let Some(prev) = self.undo_stack.pop() {
             self.redo_stack.push(self.snapshot());
             self.restore(prev);
@@ -2947,8 +3009,12 @@ impl EditorState {
     }
 
     fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.cancel_composition() {
+            cx.notify();
+            return;
+        }
         if let Some(next) = self.redo_stack.pop() {
-            self.undo_stack.push(self.snapshot());
+            self.undo_stack.push(self.selection_snapshot());
             self.restore(next);
             self.last_edit = EditKind::Other;
             cx.emit(EditorEvent::Changed);
@@ -2957,20 +3023,33 @@ impl EditorState {
     }
 
     fn snapshot(&self) -> Snapshot {
+        let mut snapshot = self.selection_snapshot();
+        snapshot.selection.start = snapshot.selection.end;
+        snapshot.reversed = false;
+        snapshot
+    }
+
+    fn selection_snapshot(&self) -> Snapshot {
         Snapshot {
             content: self.content.clone(),
-            // The forward caret (selection end), so undoing a backspace lands the
-            // caret after the restored text rather than inside it.
-            caret: self.selected_range.end,
+            selection: self.selected_range.clone(),
+            reversed: self.selection_reversed,
         }
+    }
+
+    fn push_undo(&mut self, before: Snapshot) {
+        self.undo_stack.push(before);
+        if self.undo_stack.len() > UNDO_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
     }
 
     fn restore(&mut self, s: Snapshot) {
         self.invalidate_content();
         self.content = s.content;
-        let caret = s.caret.min(self.content.len());
-        self.selected_range = caret..caret;
-        self.selection_reversed = false;
+        self.selected_range = self.editable_range(s.selection);
+        self.selection_reversed = s.reversed;
         self.marked_range = None;
         self.last_edit_keystroke = false;
         // Spans index the old text; a restore can move every byte after the
@@ -3000,11 +3079,7 @@ impl EditorState {
             _ => false,
         };
         if !coalesce {
-            self.undo_stack.push(self.snapshot());
-            if self.undo_stack.len() > UNDO_LIMIT {
-                self.undo_stack.remove(0);
-            }
-            self.redo_stack.clear();
+            self.push_undo(self.snapshot());
         }
         self.last_edit = kind;
         // A keystroke is one typed grapheme (incl. typed over a selection — that's
@@ -3188,6 +3263,10 @@ impl EditorState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.cancel_composition() {
+            cx.notify();
+            return;
+        }
         // A press on an image's corner grip starts a resize drag — this takes
         // precedence over placing the caret on the image row (which the press
         // would otherwise do). The image keeps its bounds; the drag previews a new
@@ -3825,6 +3904,10 @@ impl EditorState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.cancel_composition() {
+            cx.notify();
+            return;
+        }
         // Right-click on an inline image: Word-style object menu (Delete) — the
         // row renders as a picture, there's no text under the pointer to edit.
         // Only for real `![](src)` rows: mermaid/math rasters share the widget
@@ -5256,8 +5339,10 @@ impl EntityInputHandler for EditorState {
         self.marked_range.as_ref().map(|r| self.range_to_utf16(r))
     }
 
-    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
-        self.marked_range = None;
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.cancel_composition() {
+            cx.notify();
+        }
     }
 
     fn replace_text_in_range(
@@ -5273,6 +5358,32 @@ impl EntityInputHandler for EditorState {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         let range = self.editable_range(range);
+        if self.composition.is_some() {
+            if new_text.is_empty() {
+                self.cancel_composition();
+            } else {
+                let source = self.committed_range(range);
+                let c = self.composition.take().unwrap();
+                self.content.clear();
+                self.content.push_str(&c.before.content[..source.start]);
+                self.content.push_str(new_text);
+                self.content.push_str(&c.before.content[source.end..]);
+                self.push_undo(c.before);
+                self.invalidate_content();
+                let caret = self.caret_boundary(source.start + new_text.len());
+                self.selected_range = caret..caret;
+                self.selection_reversed = false;
+                self.marked_range = None;
+                self.goal_x = None;
+                self.diagnostics.clear();
+                self.last_replaced = None;
+                self.last_edit_keystroke = false;
+                self.last_edit = EditKind::Other;
+                cx.emit(EditorEvent::Changed);
+            }
+            cx.notify();
+            return;
+        }
         // Report what this edit replaced (see `last_replaced`) — the fact a
         // diff can't reconstruct when the selection starts with the typed char.
         self.last_replaced =
@@ -5309,11 +5420,34 @@ impl EntityInputHandler for EditorState {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         let range = self.editable_range(range);
+        if new_text.is_empty() {
+            if self.cancel_composition() {
+                cx.notify();
+            }
+            return;
+        }
+        let source = self.committed_range(range.clone());
+        if let Some(c) = &mut self.composition {
+            if self.marked_range.as_ref() == Some(&range) {
+                self.content.replace_range(range, new_text);
+            } else {
+                // A platform may specify a different replacement range on update.
+                self.content.clear();
+                self.content.push_str(&c.before.content[..source.start]);
+                self.content.push_str(new_text);
+                self.content.push_str(&c.before.content[source.end..]);
+            }
+            c.replaced = source.clone();
+        } else {
+            self.composition = Some(Composition {
+                before: self.selection_snapshot(),
+                replaced: source.clone(),
+            });
+            self.content.replace_range(range, new_text);
+        }
         self.invalidate_content();
-        self.content =
-            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
-        self.marked_range =
-            (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
+        let start = source.start;
+        self.marked_range = Some(start..start + new_text.len());
         // The selection inside a composition counts UTF-16 units from the start
         // of `new_text`, not of the document (Windows sends the IME caret this
         // way; AppKit's `setMarkedText` defines it so too). Converting it
@@ -5323,15 +5457,16 @@ impl EntityInputHandler for EditorState {
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|r| {
-                range.start + utf16_to_byte(new_text, r.start)
-                    ..range.start + utf16_to_byte(new_text, r.end)
+                start + utf16_to_byte(new_text, r.start)
+                    ..start + utf16_to_byte(new_text, r.end)
             })
             .unwrap_or_else(|| {
-                let caret = self.caret_boundary(range.start + new_text.len());
+                let caret = self.caret_boundary(start + new_text.len());
                 caret..caret
             });
-        self.remap_diagnostics(&range, new_text.len());
-        cx.emit(EditorEvent::Changed);
+        self.selected_range = self.editable_range(self.selected_range.clone());
+        self.selection_reversed = false;
+        self.diagnostics.clear();
         cx.notify();
     }
 
@@ -5396,7 +5531,10 @@ impl Render for EditorState {
             // keybindings (arrows, typing, …) would capture keys before they reach it. Drop the
             // key context for the duration so raw keys flow to the math editor's on_key_down.
             .key_context(
-                if self.editing_block.is_some() || self.editing_inline.is_some() {
+                if self.composition.is_some()
+                    || self.editing_block.is_some()
+                    || self.editing_inline.is_some()
+                {
                     ""
                 } else {
                     CONTEXT

@@ -415,7 +415,7 @@ impl Workspace {
                 note: t.path.clone(),
                 generation: t.generation,
                 baseline: doc.baseline_digest().to_owned(),
-                text: editor.read(cx).text().into(),
+                text: editor.read(cx).committed_text().into(),
                 updated: std::time::SystemTime::now(),
             },
         ))
@@ -482,7 +482,7 @@ impl Workspace {
         let TabContent::Markdown { doc, editor, .. } = &mut t.content else {
             return true;
         };
-        doc.text = editor.read(cx).text().to_owned();
+        doc.text = editor.read(cx).committed_text().to_owned();
         match v.save(doc) {
             Ok(()) => {
                 t.dirty = None;
@@ -962,7 +962,7 @@ impl Workspace {
         let text = tab
             .filter(|_| matches!(kind, NewPath::Copy))
             .and_then(Tab::editor)
-            .map(|e| e.read(cx).text().to_owned())
+            .map(|e| e.read(cx).committed_text().to_owned())
             .unwrap_or_default();
         let suggested = match kind {
             NewPath::Folder => "New folder".into(),

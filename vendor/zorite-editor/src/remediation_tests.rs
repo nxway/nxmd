@@ -384,3 +384,84 @@ fn changing_code_language_leaves_caret_on_body(cx: &mut gpui::TestAppContext) {
         }
     });
 }
+
+#[gpui::test]
+fn composition_is_one_committed_edit(cx: &mut gpui::TestAppContext) {
+    let e = cx.add_window(|w, cx| EditorState::new(w, cx).with_text("before OLD after"));
+    let changes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed = changes.clone();
+    let _sub = e
+        .update(cx, |_, _, cx| {
+            cx.subscribe(&cx.entity(), move |e, _, event: &EditorEvent, _| {
+                if matches!(event, EditorEvent::Changed) {
+                    observed.borrow_mut().push(e.text().to_owned());
+                }
+            })
+        })
+        .unwrap();
+    e.update(cx, |e, w, cx| {
+        e.selected_range = 7..10;
+        e.selection_reversed = true;
+        e.replace_and_mark_text_in_range(None, "か", Some(1..1), w, cx);
+        e.replace_and_mark_text_in_range(None, "かな", Some(2..2), w, cx);
+        assert_eq!(e.text(), "before かな after");
+    })
+    .unwrap();
+    assert!(
+        changes.borrow().is_empty(),
+        "provisional changes: {:?}",
+        changes.borrow()
+    );
+    e.update(cx, |e, w, cx| {
+        e.replace_text_in_range(None, "", w, cx);
+        assert_eq!(e.text(), "before OLD after");
+        assert_eq!(e.selected_range, 7..10);
+        assert!(e.selection_reversed);
+        assert!(e.undo_stack.is_empty());
+        e.replace_and_mark_text_in_range(None, "かな", None, w, cx);
+        e.replace_text_in_range(None, "仮名", w, cx);
+        assert_eq!(e.undo_stack.len(), 1);
+    })
+    .unwrap();
+    assert_eq!(*changes.borrow(), ["before 仮名 after"]);
+    e.update(cx, |e, w, cx| {
+        e.undo(&Undo, w, cx);
+        assert_eq!(e.text(), "before OLD after");
+        assert_eq!(e.selected_range, 7..10);
+        assert!(e.selection_reversed);
+        e.redo(&Redo, w, cx);
+        assert_eq!(e.text(), "before 仮名 after");
+        e.undo(&Undo, w, cx);
+        assert_eq!(e.selected_range, 7..10);
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn durable_text_excludes_preedit_across_host_edits(cx: &mut gpui::TestAppContext) {
+    with_editor(cx, |e, w, cx| {
+        e.set_text("前OLD後", cx);
+        e.selected_range = "前".len().."前OLD".len();
+        e.replace_and_mark_text_in_range(None, "かな", Some(1..1), w, cx);
+        assert_eq!(e.committed_text(), "前OLD後");
+        e.replace_and_mark_text_in_range(None, "候補", None, w, cx);
+        assert_eq!(e.committed_text(), "前OLD後");
+        e.unmark_text(w, cx);
+        assert_eq!(e.text(), "前OLD後");
+        assert_eq!(&e.text()[e.selected_range.clone()], "OLD");
+        e.replace_and_mark_text_in_range(None, "😀", None, w, cx);
+        let end = e.text().len();
+        e.replace_range(end..end, "!", cx);
+        assert_eq!(e.committed_text(), "前OLD後!");
+        assert_eq!(e.text(), e.committed_text());
+        e.undo(&Undo, w, cx);
+        assert_eq!(e.text(), "前OLD後");
+        e.set_cursor(0, cx);
+        e.replace_and_mark_text_in_range(Some(1..4), "漢字", Some(1..1), w, cx);
+        e.replace_text_in_range(Some(1..3), "語", w, cx);
+        assert_eq!(e.committed_text(), "前語後");
+        e.undo(&Undo, w, cx);
+        assert_eq!(e.text(), "前OLD後");
+        assert_eq!(e.selected_range, 0..0);
+    });
+}

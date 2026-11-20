@@ -24,61 +24,130 @@ function Read-ImeEvidence {
         ForEach-Object { (Get-Content $_ -Raw | ConvertFrom-Json).draft.text })
     @{ disk = [IO.File]::ReadAllText($note); drafts = $drafts }
 }
-[void][NativeSmoke]::SetForegroundWindow($mainWindow)
-Wait-SmokeForeground $mainWindow
-[uint32]$owner = 0
-$tid = [NativeSmoke]::GetWindowThreadProcessId($mainWindow,[ref]$owner)
-$ime = [ImeProbe]::ImmGetDefaultIMEWnd($mainWindow)
-$layouts = @(Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layouts' |
-    Where-Object { $_.PSChildName -match '0411$' -and $_.GetValue('Ime File') } | ForEach-Object PSChildName)
-$record.japaneseLayouts = $layouts
-foreach ($layout in @($layouts) + @('00000411')) {
-    $hkl = [ImeProbe]::LoadKeyboardLayout($layout,0)
-    if ($hkl -eq [IntPtr]::Zero) { continue }
-    [void][ImeProbe]::SendMessage($mainWindow,0x50,[IntPtr]::Zero,$hkl)
-    if (([ImeProbe]::GetKeyboardLayout($tid).ToInt64() -band 0xffff) -eq 0x411) { break }
+function Enable-JapaneseInput {
+    Wait-SmokeForeground $mainWindow
+    [uint32]$owner = 0
+    $tid = [NativeSmoke]::GetWindowThreadProcessId($mainWindow,[ref]$owner)
+    $ime = [ImeProbe]::ImmGetDefaultIMEWnd($mainWindow)
+    $layouts = @(Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layouts' |
+        Where-Object { $_.PSChildName -match '0411$' -and $_.GetValue('Ime File') } | ForEach-Object PSChildName)
+    foreach ($layout in @($layouts) + @('00000411')) {
+        $hkl = [ImeProbe]::LoadKeyboardLayout($layout,0)
+        if ($hkl -eq [IntPtr]::Zero) { continue }
+        [void][ImeProbe]::SendMessage($mainWindow,0x50,[IntPtr]::Zero,$hkl)
+        if (([ImeProbe]::GetKeyboardLayout($tid).ToInt64() -band 0xffff) -eq 0x411) { break }
+    }
+    $record.keyboardLayout = [ImeProbe]::GetKeyboardLayout($tid).ToInt64()
+    if (($record.keyboardLayout -band 0xffff) -ne 0x411 -or $ime -eq [IntPtr]::Zero) {
+        Record-Ime
+        throw 'Japanese input profile unavailable on this runner'
+    }
+    [void][ImeProbe]::SendMessage($ime,0x283,[IntPtr]6,[IntPtr]1)
+    [void][ImeProbe]::SendMessage($ime,0x283,[IntPtr]2,[IntPtr]25)
+    $record.openStatus = [ImeProbe]::SendMessage($ime,0x283,[IntPtr]5,[IntPtr]::Zero).ToInt64()
 }
-$record.keyboardLayout = [ImeProbe]::GetKeyboardLayout($tid).ToInt64()
-if (($record.keyboardLayout -band 0xffff) -ne 0x411 -or $ime -eq [IntPtr]::Zero) { Record-Ime; return }
-# IMC_SETOPENSTATUS, IMC_SETCONVERSIONMODE (native, full-width, Roman input).
-[void][ImeProbe]::SendMessage($ime,0x283,[IntPtr]6,[IntPtr]1)
-[void][ImeProbe]::SendMessage($ime,0x283,[IntPtr]2,[IntPtr]25)
-$record.openStatus = [ImeProbe]::SendMessage($ime,0x283,[IntPtr]5,[IntPtr]::Zero).ToInt64()
-if ($record.openStatus -eq 0) { Record-Ime; return }
-[System.Windows.Forms.SendKeys]::SendWait('^a')
-[ImeProbe]::Key(0x4b)
-Start-Sleep -Milliseconds 150
-[ImeProbe]::Key(0x41)
-Start-Sleep -Milliseconds 1800
+function Assert-ImeSelection([string]$expected) {
+    [System.Windows.Forms.Clipboard]::SetText([guid]::NewGuid().ToString())
+    [System.Windows.Forms.SendKeys]::SendWait('^c')
+    Wait-ImageCondition { [System.Windows.Forms.Clipboard]::GetText() -ceq $expected } 'IME selection differs from the original selection'
+}
+function Select-ImeFixture([string]$expected) {
+    [System.Windows.Forms.SendKeys]::SendWait('^a')
+    Assert-ImeSelection $expected
+}
+function Type-Ka {
+    [ImeProbe]::Key(0x4b)
+    Start-Sleep -Milliseconds 200
+    [ImeProbe]::Key(0x41)
+    Start-Sleep -Milliseconds 1800
+}
+function Restart-ImeApp {
+    $script:process = Start-Process -FilePath $exe -ArgumentList "`"$($vault.FullName)`"" -PassThru
+    Wait-ImageCondition { $process.Refresh(); $process.MainWindowTitle -ceq 'nxmd' } 'IME fixture did not reopen'
+    $script:mainWindow = $process.MainWindowHandle
+    Enable-JapaneseInput
+}
+function Check-ImeDisk([string]$expected,[string]$stage) {
+    $snapshot = Read-ImeEvidence
+    $record[$stage] = $snapshot
+    Record-Ime
+    if ($snapshot.disk -cne $expected -or $snapshot.drafts.Count -gt 0) {
+        throw "IME persistence mismatch at $stage"
+    }
+}
+
+Enable-JapaneseInput
+Select-ImeFixture $text
+Type-Ka
 $record.paused = Read-ImeEvidence
 $frame = Capture-Images 'ime-before-commit.png'; $frame.Dispose()
-[ImeProbe]::Key(0x1b)
-Start-Sleep -Milliseconds 1800
-$record.cancelled = Read-ImeEvidence
-# Select again, compose ka, then explicitly commit and undo.
-[System.Windows.Forms.SendKeys]::SendWait('^a')
-[ImeProbe]::Key(0x4b)
-[ImeProbe]::Key(0x41)
-Start-Sleep -Milliseconds 250
 [ImeProbe]::Key(0x0d)
 Start-Sleep -Milliseconds 1800
 $record.committed = Read-ImeEvidence
+Record-Ime
 if ($record.committed.disk -cne 'か') {
-    $record.reason = 'Physical keys did not produce a verified Japanese composition'
-    Record-Ime
-    return
+    throw 'Physical keys and Enter did not commit exactly one Japanese result'
+}
+$record.status = 'UNRESOLVED'
+$record.reason = 'Native composition verified; checking persistence, history and recovery'
+Record-Ime
+if ($record.paused.disk -cne $text -or $record.paused.drafts.Count -gt 0) {
+    throw 'Preedit reached disk or recovery before Enter'
 }
 [System.Windows.Forms.SendKeys]::SendWait('^z')
 Start-Sleep -Milliseconds 1800
-$record.undone = Read-ImeEvidence
-[System.Windows.Forms.SendKeys]::SendWait('^a')
-[ImeProbe]::Key(0x4b)
-[ImeProbe]::Key(0x41)
-Start-Sleep -Milliseconds 1800
-$record.beforeClose = Read-ImeEvidence
-[void]$process.CloseMainWindow()
-if (!$process.WaitForExit(10000)) { throw 'Window did not close during composition' }
-$record.afterClose = Read-ImeEvidence
-$record.status = 'OBSERVED'
-$record.reason = 'Japanese physical-key composition and explicit commit observed'
+Check-ImeDisk $text 'undone'
+Assert-ImeSelection $text
+Select-ImeFixture $text
+Type-Ka
+# Escape can dismiss the prediction popup first. The second Escape cancels the preedit.
+[ImeProbe]::Key(0x1b)
+Start-Sleep -Milliseconds 200
+[ImeProbe]::Key(0x1b)
+Start-Sleep -Milliseconds 1200
+Check-ImeDisk $text 'cancelled'
+Assert-ImeSelection $text
+Select-ImeFixture $text
+Type-Ka
+Check-ImeDisk $text 'beforeClose'
+if (!$process.CloseMainWindow() -or !$process.WaitForExit(10000)) { throw 'Window did not close during composition' }
+Check-ImeDisk $text 'afterClose'
+Restart-ImeApp
+[System.Windows.Forms.Clipboard]::SetText([guid]::NewGuid().ToString())
+Assert-EditorText $text
+
+# Keep a real pre-existing dirty generation alive by publishing a disk conflict.
+$external = 'external 版本'
+$dirty = $text+'!'
+[IO.File]::WriteAllText($note,$external,[Text.UTF8Encoding]::new($false))
+[System.Windows.Forms.Clipboard]::SetText('!')
+[System.Windows.Forms.SendKeys]::SendWait('^v')
+Wait-ImageCondition { (Read-ImeEvidence).drafts -ccontains $dirty } 'Committed dirty text did not checkpoint'
+Select-ImeFixture $dirty
+Type-Ka
+$record.beforeCrash = Read-ImeEvidence
+Record-Ime
+if ($record.beforeCrash.disk -cne $external -or $record.beforeCrash.drafts.Count -ne 1 -or
+    $record.beforeCrash.drafts[0] -cne $dirty) { throw 'Preedit polluted the previous dirty generation' }
+Stop-Process -Id $process.Id -Force
+if (!$process.WaitForExit(10000)) { throw 'Forced termination did not complete' }
+Restart-ImeApp
+[System.Windows.Forms.Clipboard]::SetText([guid]::NewGuid().ToString())
+Assert-EditorText $external
+[System.Windows.Forms.SendKeys]::SendWait('^+r')
+Wait-ImageCondition {
+    $h = [NativeSmoke]::GetForegroundWindow()
+    $label = [Text.StringBuilder]::new(256)
+    [uint32]$owner = 0
+    [void][NativeSmoke]::GetWindowThreadProcessId($h,[ref]$owner)
+    [void][NativeSmoke]::GetWindowText($h,$label,256)
+    $owner -eq $process.Id -and $label.ToString().EndsWith('Recovered draft')
+} 'IME recovery review did not open'
+$mainWindow = [NativeSmoke]::GetForegroundWindow()
+[System.Windows.Forms.Clipboard]::SetText([guid]::NewGuid().ToString())
+Assert-EditorText $dirty
+$record.recoveredEditor = $dirty
+$record.afterRecovery = Read-ImeEvidence
+$record.status = 'PASS'
+$record.reason = 'Physical Japanese input, cancel, single commit, undo, clean close and crash recovery verified'
 Record-Ime

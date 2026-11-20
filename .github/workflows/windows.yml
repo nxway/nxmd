@@ -87,6 +87,8 @@ jobs:
         continue-on-error: true
         run: |
           $language = 'Language.Basic~~~ja-JP~0.0.1.0'
+          # A registered Microsoft Japanese TIP can already compose on the hosted image.
+          if (Test-Path 'HKLM:\SOFTWARE\Microsoft\CTF\TIP\{03B5835F-F03C-411B-9CE2-AA23E1171E36}\LanguageProfile\0x00000411') { return }
           try {
             if ((Get-WindowsCapability -Online -Name $language).State -ne 'Installed') {
               Add-WindowsCapability -Online -Name $language -ErrorAction Stop | Format-List
@@ -97,9 +99,9 @@ jobs:
         continue-on-error: true
         run: |
           $languages = Get-WinUserLanguageList
-          if ('ja-JP' -notin $languages.LanguageTag) { $languages.Add('ja-JP') }
+          if (!($languages | Where-Object { $_.LanguageTag -match '^ja(-|$)' })) { $languages.Add('ja-JP') }
           Set-WinUserLanguageList -LanguageList $languages -Force
-          $profile = (Get-WinUserLanguageList | Where-Object LanguageTag -eq 'ja-JP').InputMethodTips | Select-Object -First 1
+          $profile = (Get-WinUserLanguageList | Where-Object { $_.LanguageTag -match '^ja(-|$)' }).InputMethodTips | Select-Object -First 1
           if ($profile) { Set-WinDefaultInputMethodOverride -InputTip $profile }
           Get-WinUserLanguageList | Format-List LanguageTag, InputMethodTips
           Start-Process ctfmon.exe
