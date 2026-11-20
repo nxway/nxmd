@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$Executable,
-    [ValidateSet("LF","CRLF")][string]$SelectionEnding
+    [ValidateSet("LF","CRLF")][string]$SelectionEnding,
+    [switch]$SpaceControl
 )
 $ErrorActionPreference = 'Stop'
 $exe = (Resolve-Path $Executable).Path
@@ -13,6 +14,7 @@ $text = "# Windows smoke test`r`n`r`n**Native** Markdown with 日本語.`r`n"
 if ($SelectionEnding) {
     $break = if ($SelectionEnding -eq 'LF') { "`n" } else { "`r`n" }
     $fixtureRows = @('ММММММММ', '', 'МММ', '', 'МММММММ')
+    if ($SpaceControl) { $fixtureRows[3] = '  ' }
     $text = $fixtureRows -join $break
 }
 [IO.File]::WriteAllText($note, $text, [Text.UTF8Encoding]::new($false))

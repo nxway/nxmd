@@ -16,7 +16,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ending: [LF, CRLF]
+        include:
+          - ending: LF
+            label: LF
+          - ending: CRLF
+            label: CRLF
+          - ending: LF
+            control: -SpaceControl
+            label: spaces
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -29,9 +36,9 @@ jobs:
         run: |
           if ((Get-Content affected/commit.txt -Raw).Trim() -cne '1412a6b3044b0c882cedf74fb1315a68995c2175') { throw 'Wrong executable revision' }
           Get-FileHash affected/nxmd.exe
-          ./scripts/windows-smoke.ps1 -Executable affected/nxmd.exe -SelectionEnding ${{ matrix.ending }}
+          ./scripts/windows-smoke.ps1 -Executable affected/nxmd.exe -SelectionEnding ${{ matrix.ending }} ${{ matrix.control }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: baseline-${{ matrix.ending }}
+          name: baseline-${{ matrix.label }}
           path: smoke-results/

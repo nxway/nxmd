@@ -1,6 +1,6 @@
 # Run via windows-smoke.ps1 -SelectionEnding LF or CRLF. Work in physical
 # screen pixels throughout. Use observed ink to place endpoints between glyphs.
-Add-Type -ReferencedAssemblies @('System.Drawing.Common','System.Drawing.Primitives','System.Runtime.InteropServices','System.Threading.Thread') -TypeDefinition @'
+Add-Type -ReferencedAssemblies @('System.Drawing.Common','System.Drawing.Primitives','System.Runtime.InteropServices','System.Threading.Thread','System.Collections') -TypeDefinition @'
 using System;
 using System.Drawing;
 using System.Collections.Generic;
@@ -69,7 +69,7 @@ function GlyphBoundary($Row,$Column,$Length) {
 }
 $first=GlyphBoundary $rows[0] 2 8
 $last=GlyphBoundary $rows[2] 5 7
-$expected=@($fixtureRows[0].Substring(2), '', $fixtureRows[2], '', $fixtureRows[4].Substring(0,5)) -join $break
+$expected=@($fixtureRows[0].Substring(2), '', $fixtureRows[2], $fixtureRows[3], $fixtureRows[4].Substring(0,5)) -join $break
 $errors=@()
 foreach ($direction in 'down','up') {
     if ($direction -eq 'down') { $from=$first; $to=$last } else { $from=$last; $to=$first }
@@ -86,8 +86,8 @@ foreach ($direction in 'down','up') {
         $measurements=foreach ($i in 0..4) {
             $y=if ($i % 2 -eq 0) { $inkY[$i/2] } else { [int](($inkY[($i-1)/2]+$inkY[($i+1)/2])/2) }
             $band=[PlainSelection]::TintBounds($frame,[Drawing.Rectangle]::new($area.Left,$y-2,$area.Width,5))
-            if ($i % 2 -eq 1 -and !$band.IsEmpty) { $errors+="Selected pixels on empty row $i ($direction): $band" }
-            if ($i % 2 -eq 0 -and $band.IsEmpty) { $errors+="Missing selection on text row $i ($direction)" }
+            if ($fixtureRows[$i].Length -eq 0 -and !$band.IsEmpty) { $errors+="Selected pixels on empty row $i ($direction): $band" }
+            if ($fixtureRows[$i].Length -gt 0 -and $band.IsEmpty) { $errors+="Missing selection on text row $i ($direction)" }
             @{row=$i; y=$y; x=$band.X; width=$band.Width}
         }
         @{ending=$SelectionEnding;direction=$direction;dpi=$dpi;from="$from";to="$to";source=$text;expected=$expected;clipboard=$copied;bands=$measurements} |
