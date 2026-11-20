@@ -73,9 +73,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
-          run-id: 44532247903
-          pattern: nxmd-windows-x64-*
-          merge-multiple: true
+          # Audited main, before the editor and storage remediation.
+          run-id: 44690666715
+          name: nxmd-windows-x64-0f8c9d9850bac071f465cd1947ff78a72507976b
           path: baseline-release
       - name: Compare native process metrics
         if: steps.baseline.outcome == 'success'
