@@ -24,6 +24,12 @@ jobs:
           - ending: LF
             control: -SpaceControl
             label: spaces
+          - ending: LF
+            control: -TypedBreak
+            label: typed-LF
+          - ending: CRLF
+            control: -TypedBreak
+            label: typed-CRLF
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

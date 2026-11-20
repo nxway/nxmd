@@ -165,6 +165,14 @@ mod tests {
     }
 
     #[test]
+    fn hard_break_on_blank_row_does_not_create_selectable_spaces() {
+        for eol in ["\n", "\r\n"] {
+            let source = format!("МММ{eol}");
+            assert_eq!(end(&source, true), format!("{source}{eol}"));
+        }
+    }
+
+    #[test]
     fn source_breaks() {
         assert_eq!(end("hello", false), "hello\n");
         assert_eq!(end("hello ", true), "hello  \n");

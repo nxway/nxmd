@@ -61,6 +61,18 @@ $scale=$dpi/96.0
 $area=[Drawing.Rectangle]::new($origin[0]+[int](265*$scale),$origin[1]+[int](100*$scale),[int](300*$scale),[int](250*$scale))
 # Place the caret after the fixture, clear of the three rows' ink.
 [System.Windows.Forms.SendKeys]::SendWait('^{END}')
+if ($TypedBreak) {
+    # The source ends immediately after the middle word. Finish the note with
+    # native Enter, Shift+Enter and a paste of the last word (no whitespace).
+    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+    [System.Windows.Forms.SendKeys]::SendWait('+{ENTER}')
+    [System.Windows.Forms.Clipboard]::SetText($fixtureRows[4])
+    [System.Windows.Forms.SendKeys]::SendWait('^v')
+    [System.Windows.Forms.SendKeys]::SendWait('^s')
+    Wait-ImageCondition { $saved=Read-SmokeSnapshot $note; $null -ne $saved -and $saved.EndsWith($fixtureRows[4]) } 'Fixture edit did not reach disk'
+    $text=Read-SmokeSnapshot $note
+    $before=(Get-FileHash $note).Hash
+}
 $frame=Capture-Images "$SelectionEnding-idle.png"
 try { $rows=[PlainSelection]::Ink($frame,$area) } finally {$frame.Dispose()}
 if ($rows.Count -ne 3) { throw "Expected three text rows, observed $($rows.Count) in $area" }
@@ -96,4 +108,22 @@ foreach ($direction in 'down','up') {
     if ($copied -cne $expected) { $errors+="Wrong source range for $direction" }
 }
 if ((Get-FileHash $note).Hash -ne $before) { throw 'Mouse selection modified source' }
+if ($TypedBreak -and $text -cne ($fixtureRows -join $break)) {
+    $errors+='The editor inserted source whitespace on a blank row'
+}
 if ($errors) { throw ($errors -join [Environment]::NewLine) }
+
+# Use the known scalar boundaries of the mouse selection. Verify the disk and
+# clipboard independently of the selection painter, including restoration.
+$remainder=$fixtureRows[0].Substring(0,2)+$fixtureRows[4].Substring(5)
+[System.Windows.Forms.Clipboard]::SetText('pending cut')
+[System.Windows.Forms.SendKeys]::SendWait('^x')
+Wait-SavedText $note $remainder 'Cut through blank rows'
+if ([System.Windows.Forms.Clipboard]::GetText() -cne $expected) { throw 'Cut clipboard differs from selected source' }
+[System.Windows.Forms.SendKeys]::SendWait('^z')
+Wait-SavedText $note $text 'Undo multiline cut'
+[System.Windows.Forms.SendKeys]::SendWait('^+z')
+Wait-SavedText $note $remainder 'Redo multiline cut'
+[System.Windows.Forms.SendKeys]::SendWait('^z')
+Wait-SavedText $note $text 'Restore original source'
+if ((Get-FileHash $note).Hash -ne $before) { throw 'Undo changed fixture bytes' }
