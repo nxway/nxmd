@@ -49,6 +49,15 @@ jobs:
         shell: pwsh
         timeout-minutes: 10
         run: ./scripts/windows-smoke.ps1 -Executable ./target/release/nxmd.exe
+      - name: Verify multiline mouse selection and clipboard on Windows
+        shell: pwsh
+        run: |
+          $exe = './target/release/nxmd.exe'
+          foreach ($ending in 'LF','CRLF') {
+            ./scripts/windows-smoke.ps1 -Executable $exe -SelectionEnding $ending -TypedBreak -ResultDirectory "smoke-results/typed-$ending"
+          }
+          ./scripts/windows-smoke.ps1 -Executable $exe -SelectionEnding LF -SpaceControl -ResultDirectory smoke-results/explicit-spaces
+          ./scripts/windows-smoke.ps1 -Executable $exe -SelectionEnding LF -WrappedMarkdown -ResultDirectory smoke-results/wrapped-markdown
       # Historical artifacts expire; their absence must not block a release.
       - name: Download comparison baseline
         id: baseline

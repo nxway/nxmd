@@ -147,3 +147,9 @@ Wait-SavedText $note $remainder 'Redo multiline cut'
 [System.Windows.Forms.SendKeys]::SendWait('^z')
 Wait-SavedText $note $text 'Restore original source'
 if ((Get-FileHash $note).Hash -ne $before) { throw 'Undo changed fixture bytes' }
+[PlainSelection]::Drag($first,$last)
+[System.Windows.Forms.SendKeys]::SendWait('{DELETE}')
+Wait-SavedText $note $remainder 'Delete multiline mouse selection'
+[System.Windows.Forms.SendKeys]::SendWait('^z')
+Wait-SavedText $note $text 'Undo multiline delete'
+if ((Get-FileHash $note).Hash -ne $before) { throw 'Undo Delete changed fixture bytes' }

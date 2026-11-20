@@ -39,13 +39,22 @@ pub(crate) fn newline(
     let body = &line[quote..];
     let mut insertion = String::new();
     if hard {
-        let spaces = before
-            .bytes()
-            .rev()
-            .take_while(|&b| b == b' ')
-            .take(2)
-            .count();
-        insertion.push_str(&" ".repeat(2 - spaces));
+        // A Markdown hard break terminates inline content. On a blank row
+        // the same two spaces would become selectable indentation.
+        let left = &before[(start + quote).min(range.start)..];
+        let marker = task_prefix(left)
+            .map(|(len, ..)| len)
+            .or_else(|| list_prefix(left).map(|(len, ..)| len))
+            .unwrap_or(0);
+        if !left[marker..].trim_matches([' ', '\t']).is_empty() {
+            let spaces = left
+                .bytes()
+                .rev()
+                .take_while(|&b| b == b' ')
+                .take(2)
+                .count();
+            insertion.push_str(&" ".repeat(2 - spaces));
+        }
     }
     insertion.push_str(eol);
     insertion.push_str(&line[..quote]);
@@ -170,6 +179,22 @@ mod tests {
             let source = format!("МММ{eol}");
             assert_eq!(end(&source, true), format!("{source}{eol}"));
         }
+    }
+
+    #[test]
+    fn hard_break_only_marks_inline_content_before_the_selection() {
+        for (source, caret, insertion) in [
+            ("word", 0, "\n"),
+            ("word", 2, "  \n"),
+            (" ", 1, "\n "),
+            ("> ", 2, "\n> "),
+            ("- ", 2, "\n  "),
+            ("- [ ] ", 6, "\n      "),
+            ("- body", 6, "  \n  "),
+        ] {
+            assert_eq!(newline(source, caret..caret, true, true).1, insertion);
+        }
+        assert_eq!(newline("one", 0..3, true, true), (0..3, "\n".into()));
     }
 
     #[test]
