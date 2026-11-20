@@ -81,7 +81,7 @@ jobs:
         if: steps.baseline.outcome == 'success'
         shell: pwsh
         run: ./scripts/windows-performance.ps1 -Baseline ./baseline-release/nxmd.exe -Candidate ./target/release/nxmd.exe
-      - name: Prepare Japanese input on the disposable Windows runner
+      - name: Install Japanese basic typing on the disposable Windows runner
         shell: pwsh
         timeout-minutes: 4
         continue-on-error: true
@@ -92,6 +92,10 @@ jobs:
               Add-WindowsCapability -Online -Name $language -ErrorAction Stop | Format-List
             }
           } catch { Write-Warning $_ }
+      - name: Activate the Japanese input profile for the probe
+        shell: pwsh
+        continue-on-error: true
+        run: |
           $languages = Get-WinUserLanguageList
           if ('ja-JP' -notin $languages.LanguageTag) { $languages.Add('ja-JP') }
           Set-WinUserLanguageList -LanguageList $languages -Force

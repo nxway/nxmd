@@ -4899,7 +4899,7 @@ impl EditorState {
         // replace_range parks the caret at the fence line's end, which reveals
         // the raw ``` marker (reveal-on-caret). Step onto the body's first
         // line instead so the fence stays hidden.
-        let caret = (start + new_line.len() + 1).min(self.content.len());
+        let caret = self.after_line(fence_row);
         self.selected_range = caret..caret;
         cx.emit(EditorEvent::Changed);
     }

@@ -205,4 +205,39 @@ foreach ($step in 1..16) {
     }
     $model+=$fragment
 }
+# Exercise both branches of the host callback while the native Move picker is open.
+Open-EditorFixture 5 '06 Mixed.md'
+function Open-MixedMove {
+    [NativeSmoke]::RightClick($mainWindow,80,269)
+    Start-Sleep -Milliseconds 200
+    [NativeSmoke]::Click($mainWindow,120,322)
+    $picker = Wait-Dialog
+    Wait-SmokeForeground $picker
+    Wait-ImageCondition { [NativeSmoke]::GetDlgItem($picker,1) -ne [IntPtr]::Zero } 'Move picker did not finish opening'
+}
+$moved = Join-Path $editorVault '07 Moved.md'
+$stage = Join-Path $root 'writer-stage.tmp'
+$original = Join-Path $root 'original-backup.tmp'
+$winner = Join-Path $root 'writer-backup.tmp'
+$writerText = "external publication 日本語`r`n"
+$originalHash = (Get-FileHash $mixedPath).Hash
+[IO.File]::WriteAllText($stage,$writerText,[Text.UTF8Encoding]::new($false))
+Open-MixedMove
+[IO.File]::Replace($stage,$mixedPath,$original)
+Select-Path $moved
+Wait-ImageCondition { (Image-Logs).Contains('Source file was replaced while choosing the destination') } 'Move did not detect replacement during picker'
+if ((Active-ImagePath) -ne '06 Mixed.md' -or (Test-Path $moved) -or
+    [IO.File]::ReadAllText($mixedPath) -cne $writerText -or (Get-FileHash $original).Hash -ne $originalHash) {
+    throw 'Failed move changed the active path or the competing bytes'
+}
+# Restore the test baseline while retaining the winning publication, then retry.
+[IO.File]::Replace($original,$mixedPath,$winner)
+Open-MixedMove
+Select-Path $moved
+Wait-ImageCondition { (Active-ImagePath) -eq '07 Moved.md' } 'Successful move did not update the tab path'
+if ((Test-Path $mixedPath) -or (Get-FileHash $moved).Hash -ne $originalHash -or
+    [IO.File]::ReadAllText($winner) -cne $writerText) {
+    throw 'Successful move or retry changed the competing bytes'
+}
+'PASS: native Move rejected an external replacement during the picker, kept the source tab, then updated the path only after a successful retry.' | Set-Content (Join-Path $resultDir 'move-result.txt')
 'PASS: rapid formatting-boundary navigation, typing/delete/backspace, multi-block selection, undo/redo, tab selection/history, Unicode clipboard/grapheme deletion, table cell navigation/editing at wide and narrow widths, exact BOM/CRLF/YAML save and reopen.' | Tee-Object (Join-Path $resultDir 'editor-result.txt')

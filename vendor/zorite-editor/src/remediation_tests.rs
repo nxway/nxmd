@@ -364,3 +364,23 @@ fn block_conversion_preserves_internal_terminators(cx: &mut gpui::TestAppContext
         }
     });
 }
+
+#[gpui::test]
+fn changing_code_language_leaves_caret_on_body(cx: &mut gpui::TestAppContext) {
+    with_editor(cx, |e, w, cx| {
+        for eol in ["\r\n", "\n"] {
+            let source = ["```js", "界", "```"].join(eol);
+            e.set_text(&source, cx);
+            e.set_code_lang(0, "rust", cx);
+            assert_eq!(e.cursor_offset(), e.text().find('界').unwrap());
+            e.replace_text_in_range(None, "X", w, cx);
+            assert_eq!(
+                e.text().as_bytes(),
+                ["```rust", "X界", "```"].join(eol).as_bytes()
+            );
+            e.undo(&Undo, w, cx);
+            e.undo(&Undo, w, cx);
+            assert_eq!(e.text().as_bytes(), source.as_bytes());
+        }
+    });
+}
