@@ -2,14 +2,18 @@
 use anyhow::{Context, Result, bail};
 use std::{fs, io::Read, path::Path};
 
-pub(crate) fn move_note(source: &Path, dest: &Path, baseline: Option<&[u8]>) -> Result<()> {
-    transact(source, dest, baseline, || Ok(()))
+pub(crate) fn move_note(
+    source: &Path,
+    dest: &Path,
+    expected: Option<(&fs::File, &[u8])>,
+) -> Result<()> {
+    transact(source, dest, expected, || Ok(()))
 }
 
 fn transact(
     source: &Path,
     dest: &Path,
-    baseline: Option<&[u8]>,
+    expected: Option<(&fs::File, &[u8])>,
     before_rename: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     let mut options = fs::OpenOptions::new();
@@ -37,7 +41,11 @@ fn transact(
             bail!("Cannot move a reparse point");
         }
     }
-    if let Some(expected) = baseline {
+    if let Some((original, expected)) = expected {
+        #[cfg(any(unix, windows))]
+        if identity(original)? != identity(&file)? {
+            bail!("Source file was replaced while choosing the destination");
+        }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         if bytes != expected {
@@ -50,12 +58,47 @@ fn transact(
     #[cfg(any(target_os = "linux", target_vendor = "apple"))]
     {
         use rustix::fs::{CWD, RenameFlags, renameat_with};
+        // Unix cannot lock out pathname replacement. Refuse a replacement
+        // already visible here. The single rename still preserves a version
+        // published during the final syscall race, under its new name.
+        if identity(&fs::File::open(source)?)? != identity(&file)? {
+            bail!("Source file was replaced before rename");
+        }
         renameat_with(CWD, source, CWD, dest, RenameFlags::NOREPLACE)
             .context("Cannot move note without replacing destination")?;
         Ok(())
     }
     #[cfg(not(any(windows, target_os = "linux", target_vendor = "apple")))]
     bail!("This platform does not provide a supported no-overwrite rename")
+}
+
+// Both handles stay live through comparison, preventing reuse of an old file ID.
+#[cfg(windows)]
+fn identity(file: &fs::File) -> Result<(u64, [u8; 16])> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+    };
+    let mut id = FILE_ID_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            (&raw mut id).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error()).context("Cannot verify move source identity");
+    }
+    Ok((id.VolumeSerialNumber, id.FileId.Identifier))
+}
+
+#[cfg(unix)]
+fn identity(file: &fs::File) -> Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let info = file.metadata()?;
+    Ok((info.dev(), info.ino()))
 }
 
 #[cfg(windows)]
@@ -105,14 +148,16 @@ mod tests {
         );
         fs::write(&src, b"editor\r\n")?;
         fs::write(&stage, b"external\n")?;
+        let original = fs::File::open(&src)?;
         // A competing atomic publication wins before validation.
         fs::rename(&stage, &src)?;
-        assert!(move_note(&src, &dst, Some(b"editor\r\n")).is_err());
+        assert!(move_note(&src, &dst, Some((&original, b"editor\r\n"))).is_err());
         assert_eq!(fs::read(&src)?, b"external\n");
         assert!(!dst.exists());
+        let current = fs::File::open(&src)?;
         // Destination appears after validation, before the kernel operation.
         assert!(
-            transact(&src, &dst, Some(b"external\n"), || {
+            transact(&src, &dst, Some((&current, b"external\n")), || {
                 fs::write(&dst, b"other destination")?;
                 Ok(())
             })
@@ -121,9 +166,27 @@ mod tests {
         assert_eq!(fs::read(&src)?, b"external\n");
         assert_eq!(fs::read(&dst)?, b"other destination");
         let retry = d.path().join("retry.md");
-        move_note(&src, &retry, Some(b"external\n"))?;
+        move_note(&src, &retry, Some((&current, b"external\n")))?;
         assert_eq!(fs::read(retry)?, b"external\n");
         assert!(!src.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn replacement_with_identical_bytes_is_a_different_note() -> Result<()> {
+        let d = tempfile::tempdir()?;
+        let (src, dst, stage) = (
+            d.path().join("a.md"),
+            d.path().join("b.md"),
+            d.path().join("stage"),
+        );
+        fs::write(&src, "same bytes")?;
+        let original = fs::File::open(&src)?;
+        fs::write(&stage, "same bytes")?;
+        fs::rename(stage, &src)?;
+        assert!(move_note(&src, &dst, Some((&original, b"same bytes"))).is_err());
+        assert_eq!(fs::read(src)?, b"same bytes");
+        assert!(!dst.exists());
         Ok(())
     }
 
@@ -139,8 +202,9 @@ mod tests {
         );
         fs::write(&src, "original")?;
         fs::write(&stage, "newest")?;
+        let original = fs::File::open(&src)?;
         let blocker = fs::OpenOptions::new().read(true).share_mode(1).open(&src)?;
-        let err = move_note(&src, &dst, Some(b"original")).unwrap_err();
+        let err = move_note(&src, &dst, Some((&original, b"original"))).unwrap_err();
         assert_eq!(
             err.downcast_ref::<std::io::Error>()
                 .and_then(|e| e.raw_os_error()),
@@ -149,11 +213,14 @@ mod tests {
         assert!(!dst.exists());
         assert_eq!(fs::read(&src)?, b"original");
         drop(blocker);
-        transact(&src, &dst, Some(b"original"), || {
-            assert_eq!(
-                fs::rename(&stage, &src).unwrap_err().raw_os_error(),
-                Some(32)
-            );
+        transact(&src, &dst, Some((&original, b"original")), || {
+            // The source open above reports ERROR_SHARING_VIOLATION. A
+            // competing rename can instead report ERROR_ACCESS_DENIED.
+            let error = fs::rename(&stage, &src).unwrap_err();
+            assert!(matches!(error.raw_os_error(), Some(5 | 32)), "{error}");
+            assert_eq!(fs::read(&src)?, b"original");
+            assert_eq!(fs::read(&stage)?, b"newest");
+            assert!(!dst.exists());
             Ok(())
         })?;
         assert!(!src.exists());

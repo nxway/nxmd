@@ -1,4 +1,6 @@
 use crate::image_store::{ImageStore, Key as ImageKey, State as ImageState};
+use anyhow::Context as _;
+use crate::image_store::{ImageStore, Key as ImageKey, State as ImageState};
 use gpui::*;
 use nxmd::{
     config::Session,
@@ -946,6 +948,18 @@ impl Workspace {
             return;
         }
         let old = tab.map(|t| t.path.clone());
+        let original = if let (NewPath::Move, Some(path)) = (kind, &old) {
+            match vault.open_move_source(path) {
+                Ok(file) => Some(file),
+                Err(error) => {
+                    self.status = format!("Cannot open source for move: {error}");
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let text = tab
             .and_then(Tab::editor)
             .map(|e| e.read(cx).text().to_owned())
@@ -1006,7 +1020,11 @@ impl Workspace {
                             let TabContent::Markdown { doc, .. } = &this.tabs[i].content else {
                                 anyhow::bail!("Source tab is no longer a note");
                             };
-                            vault.move_document(doc, &rel)?;
+                            vault.move_document(
+                                doc,
+                                original.as_ref().context("Missing move source")?,
+                                &rel,
+                            )?;
                             this.tabs.remove(i);
                             this.active = 0;
                             this.open(rel, window, cx);

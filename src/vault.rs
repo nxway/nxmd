@@ -229,12 +229,17 @@ impl Vault {
         crate::note_move::move_note(&self.resolve(from)?, &self.resolve(to)?, None)
     }
 
+    /// Keep the original file ID live while the destination picker is open.
+    pub fn open_move_source(&self, path: &Path) -> Result<fs::File> {
+        Ok(fs::File::open(self.resolve(path)?)?)
+    }
+
     /// Move the saved version the tab expects. Revalidate on the rename handle.
-    pub fn move_document(&self, doc: &Document, to: &Path) -> Result<()> {
+    pub fn move_document(&self, doc: &Document, original: &fs::File, to: &Path) -> Result<()> {
         crate::note_move::move_note(
             &self.resolve(&doc.path)?,
             &self.resolve(to)?,
-            Some(doc.baseline()),
+            Some((original, doc.baseline())),
         )
     }
     pub fn verify(&self, doc: &Document) -> Result<()> {
