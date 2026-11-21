@@ -53,6 +53,12 @@ jobs:
           path: artifacts/
           if-no-files-found: error
           retention-days: 30
+      - name: Capture responsive table layout on the native desktop
+        shell: pwsh
+        run: |
+          foreach ($fixture in 'exercise','oversized') {
+            ./scripts/windows-smoke.ps1 -Executable ./target/release/nxmd.exe -TableFixture $fixture -ResultDirectory "smoke-results/table-layout/$fixture"
+          }
       - name: Native window smoke test
         shell: pwsh
         timeout-minutes: 10

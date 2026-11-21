@@ -4,6 +4,7 @@ param(
     [switch]$SpaceControl,
     [switch]$TypedBreak,
     [switch]$ImeProbe,
+    [ValidateSet("exercise","oversized")][string]$TableFixture,
     [switch]$WrappedMarkdown,
     [string]$ResultDirectory = "smoke-results"
 )
@@ -15,6 +16,13 @@ $vault = New-Item -ItemType Directory -Path (Join-Path $root 'vault') -Force
 $config = New-Item -ItemType Directory -Path (Join-Path $root 'localappdata/nxmd') -Force
 $note = Join-Path $vault 'Smoke.md'
 $text = "# Windows smoke test`r`n`r`n**Native** Markdown with 日本語.`r`n"
+if ($TableFixture -eq 'exercise') {
+    $text = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '../tests/fixtures/responsive-exercise-tables.md'))
+} elseif ($TableFixture -eq 'oversized') {
+    $rows = 1..32 | ForEach-Object { "| Row $_ | 10 | Жим | 中文 | 👩‍💻 | 60s | 20kg | Cable | https://example.com/abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz | Finish |" }
+    $text = (@('| Exercise | Sets | Reps | Rest | Notes | Time | Load | Gear | Reference | Cue |',
+        '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |') + $rows) -join "`n"
+}
 if ($ImeProbe) { $text = 'Original 選択' }
 if ($SelectionEnding) {
     $break = if ($SelectionEnding -eq 'LF') { "`n" } else { "`r`n" }
@@ -308,6 +316,10 @@ try {
     if (!$process.Responding) { throw 'Native window is not responding to Windows messages' }
     if ((Get-FileHash $note -Algorithm SHA256).Hash -ne $before) { throw 'Opening a note changed its bytes' }
     $mainWindow=$process.MainWindowHandle
+    if ($TableFixture) {
+        . "$PSScriptRoot/windows-table-layout.ps1"
+        return
+    }
     if ($ImeProbe) {
         . "$PSScriptRoot/windows-ime-probe.ps1"
         return

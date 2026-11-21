@@ -486,3 +486,19 @@ fn multiline_paste_preserves_source_endings(cx: &mut gpui::TestAppContext) {
         }
     });
 }
+
+#[gpui::test]
+fn exercise_table_layout(cx: &mut gpui::TestAppContext) {
+    let source = include_str!("../../../tests/fixtures/responsive-exercise-tables.md");
+    with_editor(cx, |e, w, cx| {
+        e.set_text(source, cx);
+        let scan = e.scan_data();
+        assert_eq!(scan.tables.len(), 2);
+        let style = markdown_syntax::tests::test_style();
+        for region in &scan.tables {
+            let cols = table_column_widths(e, region, w, &w.text_style().font(), px(18.), Hsla::default(), None, Some(px(400.)), Some(&style));
+            let total: Pixels = cols.iter().copied().sum();
+            assert!(total <= px(400.), "table at row {} occupies {total:?} of 400px", region.lines.start);
+        }
+    });
+}
