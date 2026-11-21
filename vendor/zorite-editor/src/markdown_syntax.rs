@@ -2167,8 +2167,8 @@ pub(crate) struct TableRegion {
     /// Index of the style-marker comment line above the header, if present — the
     /// editor hides it (revealed only when the caret lands on it).
     pub marker_line: Option<usize>,
-    /// Explicit column widths (logical px) from the marker's `cols=` attribute
-    /// — written by drag-to-resize; `None` = content-measured.
+    /// Authored column widths (logical px) from the marker's `cols=` attribute.
+    /// Without one the initial widths come from the cell contents.
     pub col_widths_attr: Option<Vec<f32>>,
     /// The table reads right-to-left (#66), so its grid hugs the note column's
     /// RIGHT edge with the 22px gutter on the other side — the reader's

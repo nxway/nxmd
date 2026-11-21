@@ -31,10 +31,22 @@ if ($TableFixture -eq 'exercise') {
         [void][TableViewport]::SetCursorPos(15,15)
         Save-TableFrame "day-b-$width"
     }
+    # Enter the final Notes cell, paste a sentence that reflows the row,
+    # and prove the native caret inserted it inside the intended source cell.
     [System.Windows.Forms.SendKeys]::SendWait('^{END}')
-    [System.Windows.Forms.SendKeys]::SendWait('x')
+    [System.Windows.Forms.SendKeys]::SendWait('{LEFT 8}')
+    $marker = ' Maintain control throughout the entire movement. '
+    [System.Windows.Forms.Clipboard]::SetText($marker)
+    [System.Windows.Forms.SendKeys]::SendWait('^v')
     [System.Windows.Forms.SendKeys]::SendWait('^s')
-    Wait-SavedText $note ($text+'x') 'Editing after table reflow'
+    $edited = Wait-SavedInsertion $note $marker
+    $at = $edited.IndexOf($marker)
+    $cell = 'Pull back and hold.'
+    $start = $text.IndexOf($cell)
+    if ($start -lt 0 -or $at -lt $start -or $at -gt $start+$cell.Length -or
+        $edited.Remove($at,$marker.Length) -cne $text) { throw 'Native edit missed the final Notes cell or changed surrounding Markdown' }
+    [void][TableViewport]::SetCursorPos(15,15)
+    Save-TableFrame 'day-b-edited-1000'
     [System.Windows.Forms.SendKeys]::SendWait('^z')
     [System.Windows.Forms.SendKeys]::SendWait('^s')
     Wait-SavedText $note $text 'Undo after table reflow'
@@ -43,6 +55,9 @@ if ($TableFixture -eq 'exercise') {
     Save-TableFrame 'wide-left'
     for ($i=0; $i -lt 8; $i++) { Send-TableWheel 0x20e 120 }
     Save-TableFrame 'wide-right'
+    for ($i=0; $i -lt 32; $i++) { Send-TableWheel 0x20e 120 }
+    [void][TableViewport]::SetCursorPos(15,15)
+    Save-TableFrame 'wide-far-edge'
     Send-TableWheel 0x20a -1200
     Save-TableFrame 'wide-scrolled'
 }

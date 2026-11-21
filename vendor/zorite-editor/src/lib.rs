@@ -938,9 +938,11 @@ pub struct EditorState {
     /// that image paints at the live width and other mouse handling is suppressed.
     image_resize: Option<ImageResize>,
     /// An in-progress table column-border drag (drag-to-resize, issue #16):
-    /// the column resizes live; release persists `cols=` into the table's
-    /// marker line. `None` = no drag.
+    /// the column resizes live; release commits the width to the
+    /// current editor view. `None` = no drag.
     table_col_resize: Option<TableColResize>,
+    /// View-local overrides of authored widths, keyed by the table header row.
+    table_widths: std::collections::HashMap<usize, Vec<Option<f32>>>,
     /// Last-paint column-resize grip bands: `(band, header row, column, width)`.
     table_col_resize_rects: Vec<(Bounds<Pixels>, usize, usize, f32)>,
     /// The band index the pointer is on (repaint-on-change for its accent line).
@@ -1141,6 +1143,7 @@ impl EditorState {
             alert_fold_rects: Vec::new(),
             image_resize: None,
             table_col_resize: None,
+            table_widths: Default::default(),
             table_col_resize_rects: Vec::new(),
             table_resize_hover: None,
             shape_memo: std::cell::RefCell::new(None),
@@ -1177,6 +1180,8 @@ impl EditorState {
 
     /// Builder: start with the given text (caret at the start).
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        self.table_widths.clear();
+        self.table_scroll_x.clear();
         self.invalidate_content();
         self.content = normalize_loaded(text.into());
         let caret = caret_off_marker_line(&self.content, 0);
@@ -1266,6 +1271,8 @@ impl EditorState {
     /// Replace the whole document; resets the caret to the start.
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.composition = None;
+        self.table_widths.clear();
+        self.table_scroll_x.clear();
         self.invalidate_content();
         self.content = normalize_loaded(text.into());
         // Never park the loaded caret on a collapsed marker line (`<!-- table/
@@ -3049,6 +3056,7 @@ impl EditorState {
     }
 
     fn restore(&mut self, s: Snapshot) {
+        self.restore_table_widths(&s.content);
         self.invalidate_content();
         self.content = s.content;
         self.selected_range = self.editable_range(s.selection);
@@ -3065,6 +3073,7 @@ impl EditorState {
     /// inserts (or a run of deletes) into one undo step so typing isn't undone
     /// one character at a time.
     fn record_edit(&mut self, range: &Range<usize>, new_text: &str) {
+        self.adjust_table_widths(range, new_text);
         self.invalidate_content();
         let kind = if new_text.is_empty() {
             EditKind::Delete
@@ -3549,7 +3558,7 @@ impl EditorState {
             return;
         }
         // A press on a column border's resize band starts a drag — the column
-        // resizes live; release persists the width (issue #16). A DOUBLE-click
+        // resizes live; release keeps the width in this view. A DOUBLE-click
         // auto-fits the column to its content instead (the Excel/Sheets
         // convention for a column border).
         if let Some(&(_, header_row, col, width)) = self
@@ -3669,10 +3678,11 @@ impl EditorState {
             cx.notify();
             return;
         }
-        // End a column-border drag by persisting every column's width into the
-        // table marker's `cols=` list (one undo step, emits Changed).
+        // Resizing is view state, independent of text history and autosave.
         if let Some(resize) = self.table_col_resize.take() {
-            self.commit_table_col_widths(resize, cx);
+            if resize.width != resize.orig {
+                self.set_table_width(resize.header_row, resize.col, resize.width);
+            }
             cx.notify();
             return;
         }
@@ -5365,6 +5375,7 @@ impl EntityInputHandler for EditorState {
             if new_text.is_empty() {
                 self.cancel_composition();
             } else {
+                self.adjust_table_widths(&range, new_text);
                 let source = self.committed_range(range);
                 let c = self.composition.take().unwrap();
                 self.content.clear();
@@ -5428,6 +5439,11 @@ impl EntityInputHandler for EditorState {
                 cx.notify();
             }
             return;
+        }
+        if !self.table_widths.is_empty()
+            && (self.content[range.clone()].contains('\n') || new_text.contains('\n'))
+        {
+            self.table_widths.clear();
         }
         let source = self.committed_range(range.clone());
         if let Some(c) = &mut self.composition {
@@ -6678,7 +6694,8 @@ struct TableRow {
     /// offset (in-cell editing).
     cell_ranges: Vec<Range<usize>>,
     aligns: Vec<markdown_syntax::Align>,
-    col_widths: Vec<Pixels>,
+    col_widths: std::rc::Rc<[Pixels]>,
+    pad: Pixels,
     is_header: bool,
     is_separator: bool,
     is_last: bool,
@@ -7142,19 +7159,19 @@ struct CachedLineRuns {
 type RowKeys = (Option<u64>, Vec<Option<u64>>);
 
 /// The measured table column widths cache: one keyed entry for the doc.
-type RegionCols = Option<(u64, std::rc::Rc<Vec<Vec<Pixels>>>)>;
+type RegionCols = Option<(u64, std::rc::Rc<Vec<tables::TableColumns>>)>;
 
 /// The editor-owned caches `shape_document` reads and writes (interior-
 /// mutable — shaping runs under a read borrow of the editor):
 /// - `line_runs`: each markdown line's built display + runs (cross-frame).
-/// - `region_cols`: the measured table column widths for the WHOLE document,
-///   one keyed entry — rebuilt when the tables' source, the wrap width, the
-///   font epoch, or a live column drag changes.
+/// - `table_metrics`: intrinsic text widths for the current source and font.
+/// - `region_cols`: those metrics allocated to the current viewport and grips.
 /// - `cell_rows`: per table row, how many wrap rows its tallest cell needs.
 #[derive(Default)]
 struct ShapeCaches {
     line_runs: std::cell::RefCell<std::collections::HashMap<u64, CachedLineRuns>>,
     region_cols: std::cell::RefCell<RegionCols>,
+    table_metrics: std::cell::RefCell<Option<(u64, Vec<tables::TableMetrics>)>>,
     cell_rows: std::cell::RefCell<std::collections::HashMap<u64, usize>>,
     table_cells: std::cell::RefCell<
         std::collections::HashMap<u64, (String, std::rc::Rc<Vec<ProjectedCell>>)>,

@@ -965,9 +965,12 @@ impl Element for EditorElement {
                 // hand-cursor hitbox here; paint draws it and mouse-down
                 // drags it (see `on_mouse_down`).
                 let avail = bounds.size.width - px(TABLE_GUTTER * 2.);
-                if width > avail {
-                    let th_w = (avail / f32::from(width) * f32::from(avail)).max(px(24.));
-                    let range = f32::from(width - avail);
+                let overflow = table_overflow(width, avail);
+                if overflow > px(0.) && avail > px(0.) {
+                    let th_w = (avail / f32::from(width) * f32::from(avail))
+                        .max(px(24.))
+                        .min(avail);
+                    let range = f32::from(overflow);
                     let sx = editor.table_sx(tbl_header, width, avail);
                     // Track left is FIXED (the gutter edge) — `left` is the
                     // scrolled content edge and would drift the thumb. An RTL
@@ -1167,8 +1170,9 @@ impl Element for EditorElement {
                 }
                 if let Some(t) = tables.get(row).and_then(Option::as_ref) {
                     let left = editor.table_left(t, row, &bounds);
-                    let (vis_l, vis_r) = table_visible_band(bounds.left(), bounds.size.width, t.rtl);
-                    let pad = px(TABLE_CELL_PAD);
+                    let (vis_l, vis_r) =
+                        table_visible_band(bounds.left(), bounds.size.width, t.rtl);
+                    let pad = t.pad;
                     for (cell, range) in t.cell_ranges.iter().enumerate() {
                         let start = a.max(range.start);
                         let end = b.min(range.end);
@@ -2371,6 +2375,19 @@ impl Element for EditorElement {
             editor.chip_rows = chip_rows;
             editor.line_insets = line_insets;
             editor.rtl_rows = std::mem::take(&mut prepaint.rtl);
+            let available = bounds.size.width - px(2. * TABLE_GUTTER);
+            editor.table_scroll_x.retain(|header, sx| {
+                let Some(t) = table_rows
+                    .get(*header)
+                    .and_then(Option::as_ref)
+                    .filter(|t| t.is_header)
+                else {
+                    return false;
+                };
+                let max = table_overflow(t.col_widths.iter().copied().sum(), available);
+                *sx = sx.clamp(0., f32::from(max));
+                *sx > 0.
+            });
             editor.table_rows = table_rows;
             editor.image_rects = image_rects;
             editor.inline_math_rects = inline_math_rects;
@@ -2898,56 +2915,66 @@ fn shape_document(
             *rk = (row_keys_epoch, vec![None; starts.len()]);
         }
     }
-    // Measured column widths, cached across frames: rebuilt only when the
-    // tables' source text, the wrap width, the font epoch, or a live column
-    // drag changes — measuring shaped every cell of every table per call.
-    let region_cols: std::rc::Rc<Vec<Vec<Pixels>>> = {
-        let cols_key = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            // The scan generation covers every table byte and the `cols=`
-            // attr — no need to rehash the table text per frame.
-            scan.generation.hash(&mut h);
-            f32::from(base_font_size).to_bits().hash(&mut h);
-            run_epoch.hash(&mut h);
-            wrap_width.map(|w| f32::from(w).to_bits()).hash(&mut h);
-            if let Some(r) = col_resize {
-                r.header_row.hash(&mut h);
-                r.col.hash(&mut h);
-                r.width.to_bits().hash(&mut h);
-            }
-            h.finish()
-        };
-        let hit = caches
-            .region_cols
-            .borrow()
-            .as_ref()
-            .filter(|(k, cols)| *k == cols_key && cols.len() == regions.len())
-            .map(|(_, cols)| cols.clone());
-        match hit {
-            Some(cols) => cols,
-            None => {
-                let cols: std::rc::Rc<Vec<Vec<Pixels>>> = std::rc::Rc::new(
+    // Keep intrinsic shaping separate from width allocation. Resizing a
+    // window or dragging a column only needs the measured text widths.
+    let region_cols = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        scan.generation.hash(&mut h);
+        f32::from(base_font_size).to_bits().hash(&mut h);
+        run_epoch.hash(&mut h);
+        let metrics_key = h.finish();
+        wrap_width.map(|w| f32::from(w).to_bits()).hash(&mut h);
+        if let Some(r) = col_resize {
+            r.header_row.hash(&mut h);
+            r.col.hash(&mut h);
+            r.width.to_bits().hash(&mut h);
+        }
+        let cols_key = h.finish();
+        let mut allocated = caches.region_cols.borrow_mut();
+        if let Some((_, cols)) = allocated.as_ref().filter(|(k, _)| *k == cols_key) {
+            cols.clone()
+        } else {
+            let mut metrics = caches.table_metrics.borrow_mut();
+            if metrics.as_ref().is_none_or(|(k, _)| *k != metrics_key) {
+                *metrics = Some((
+                    metrics_key,
                     regions
                         .iter()
                         .map(|r| {
-                            table_column_widths(
+                            measure_table_columns(
                                 editor,
                                 r,
                                 window,
                                 base_font,
                                 base_font_size,
                                 base_color,
-                                col_resize,
-                                wrap_width.map(|w| (w - px(TABLE_GUTTER * 2.)).max(px(0.))),
                                 md,
                             )
                         })
                         .collect(),
-                );
-                *caches.region_cols.borrow_mut() = Some((cols_key, cols.clone()));
-                cols
+                ));
             }
+            let available = wrap_width.map(|w| (w - px(TABLE_GUTTER * 2.)).max(px(0.)));
+            let cols = std::rc::Rc::new(
+                regions
+                    .iter()
+                    .zip(&metrics.as_ref().unwrap().1)
+                    .map(|(r, m)| {
+                        let header = r.lines.start;
+                        let manual = editor.table_widths.get(&header);
+                        m.allocate(available, |col| {
+                            col_resize
+                                .filter(|d| d.header_row == header && d.col == col)
+                                .map(|d| d.width)
+                                .or_else(|| manual.and_then(|v| v.get(col).copied().flatten()))
+                                .or_else(|| r.col_widths_attr.as_ref()?.get(col).copied())
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            *allocated = Some((cols_key, cols.clone()));
+            cols
         }
     };
     let table_row_h = base_font_size * LINE_HEIGHT_RATIO + px(12.);
@@ -3335,7 +3362,8 @@ fn shape_document(
                         .collect(),
                     cell_ranges: ranges,
                     aligns: r.aligns.clone(),
-                    col_widths: region_cols[ri].clone(),
+                    col_widths: region_cols[ri].widths.clone(),
+                    pad: region_cols[ri].pad,
                     is_header: idx == r.lines.start,
                     is_separator: idx == r.lines.start + 1,
                     is_last: idx + 1 == r.lines.end,
@@ -3914,7 +3942,8 @@ fn shape_document(
                             let mut h = std::collections::hash_map::DefaultHasher::new();
                             t.projection_key.hash(&mut h);
                             f32::from(base_font_size).to_bits().hash(&mut h);
-                            for w in &t.col_widths {
+                            f32::from(t.pad).to_bits().hash(&mut h);
+                            for w in t.col_widths.iter() {
                                 f32::from(*w).to_bits().hash(&mut h);
                             }
                             t.is_header.hash(&mut h);
@@ -3925,12 +3954,7 @@ fn shape_document(
                         let rows = match hit {
                             Some(r) => r,
                             None => {
-                                let r = table_row_wrap_rows(
-                                    window,
-                                    &t.projected,
-                                    &t.col_widths,
-                                    base_font_size,
-                                );
+                                let r = table_row_wrap_rows(window, t, base_font_size);
                                 caches.cell_rows.borrow_mut().insert(row_key, r);
                                 r
                             }

@@ -46,7 +46,7 @@ impl EditorState {
 
     /// The clamped horizontal scroll of the table headed at `header_row`.
     pub(crate) fn table_sx(&self, header_row: usize, total: Pixels, avail: Pixels) -> Pixels {
-        let max = f32::from((total - avail).max(px(0.)));
+        let max = f32::from(table_overflow(total, avail));
         px(self
             .table_scroll_x
             .get(&header_row)
@@ -104,14 +104,14 @@ impl EditorState {
         }
         let total: Pixels = t.col_widths.iter().copied().sum();
         let avail = bounds.size.width - px(TABLE_GUTTER * 2.);
-        if total <= avail {
+        let max = f32::from(table_overflow(total, avail));
+        if max == 0. {
             if dbg {
                 eprintln!("wheel: fits total={total:?} avail={avail:?}");
             }
             return;
         }
-        let max = f32::from(total - avail);
-        let cur = self.table_scroll_x.get(&header).copied().unwrap_or(0.);
+        let cur = f32::from(self.table_sx(header, total, avail));
         // An RTL table's scroll offset runs the other way (see `table_left_x`),
         // so the same physical swipe moves its content the same physical way.
         let new = if t.rtl { cur + dx } else { cur - dx }.clamp(0., max);
@@ -225,7 +225,7 @@ impl EditorState {
         // Measure at the last paint's font + size — the style stack is unwound
         // during event dispatch, so `text_style()` here reports the root style.
         let font_size = self.font_size;
-        let pad = px(TABLE_CELL_PAD);
+        let pad = t.pad;
         // Column the click is in, and its left x — through the same mirrored
         // mapping the cells were painted with, or a click lands in a different
         // cell than the one under the pointer (on an RTL table the columns run
@@ -318,9 +318,8 @@ impl EditorState {
             .unwrap_or_else(|| window.text_style().font());
         let (x, y, cell, _) = table_caret_pos(table, col, px(0.), &font, self.font_size, window)?;
         let projected = table.projected.get(cell)?;
-        let width = (cell_span_width(&table.col_widths, table.cells.len(), cell)
-            - px(TABLE_CELL_PAD * 2.))
-        .max(px(8.));
+        let width = (cell_span_width(&table.col_widths, table.cells.len(), cell) - table.pad * 2.)
+            .max(px(8.));
         let line = shape_cell(window, projected, self.font_size, Some(width))?;
         let line_h = self.font_size * LINE_HEIGHT_RATIO;
         let target_y = y + line_h * dir as f32;
@@ -330,10 +329,7 @@ impl EditorState {
             let cell_x = col_offset(&table.col_widths, table.cells.len(), cell, table.rtl);
             let source = cell_offset_for_point(
                 projected,
-                point(
-                    x - cell_x - px(TABLE_CELL_PAD) - align,
-                    target_y + line_h / 2.,
-                ),
+                point(x - cell_x - table.pad - align, target_y + line_h / 2.),
                 width,
                 self.font_size,
                 window,
@@ -727,7 +723,7 @@ impl EditorState {
     /// marker, `None` (Grid, the default) removes it. One undo step.
     /// Rewrite (or insert/remove) the marker line above `region` to say
     /// `marker` (`None` = no marker needed). The caret keeps its cell. One
-    /// undo step; shared by the style menu and drag-to-resize.
+    /// undo step for the style menu.
     fn rewrite_table_marker(
         &mut self,
         region: &markdown_syntax::TableRegion,
@@ -797,11 +793,9 @@ impl EditorState {
         self.rewrite_table_marker(&region, marker, cx);
     }
 
-    /// Persist a finished column-border drag: every column's current display
-    /// width goes into the marker's `cols=` list (style preserved).
     /// Double-click on a column border: auto-fit the column to its widest
     /// content (Excel's AutoFit). Measures the region with explicit widths
-    /// stripped, then persists the natural width through the same marker path
+    /// ignored, then applies the natural width through the same view-local path
     /// as a drag release.
     pub(crate) fn autofit_table_col(
         &mut self,
@@ -810,7 +804,7 @@ impl EditorState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(mut region) = self
+        let Some(region) = self
             .scan_data()
             .tables
             .iter()
@@ -819,7 +813,6 @@ impl EditorState {
         else {
             return;
         };
-        region.col_widths_attr = None; // natural, content-measured widths
         // Measure with the PAINT font — the shaping that lays the table out
         // uses it, and the root font event dispatch reports has different
         // metrics (autofit widths were off by the family drift).
@@ -827,63 +820,93 @@ impl EditorState {
             .paint_font
             .clone()
             .unwrap_or_else(|| window.text_style().font());
-        let natural = table_column_widths(
+        let natural = measure_table_columns(
             self,
             &region,
             window,
             &font,
             self.font_size,
             Hsla::default(),
-            None,
-            None,
             self.markdown_style.as_ref(),
         );
-        let Some(&w) = natural.get(col) else {
+        let Some(&width) = natural.preferred.get(col) else {
             return;
         };
-        // Ceil: the marker serializes widths as whole px (`w.round()`), and a
-        // fraction-of-a-pixel shortfall wraps the widest cell's last word.
-        self.commit_table_col_widths(
-            TableColResize {
-                header_row,
-                col,
-                start_x: px(0.),
-                orig: 0.,
-                width: f32::from(w).ceil(),
-            },
-            cx,
-        );
+        self.set_table_width(header_row, col, width + TABLE_CELL_PAD * 2.);
         cx.notify();
     }
 
-    pub(crate) fn commit_table_col_widths(
-        &mut self,
-        resize: TableColResize,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(region) = self
-            .scan_data()
-            .tables
-            .iter()
-            .find(|r| r.lines.start == resize.header_row)
-            .cloned()
-        else {
+    /// A body edit keeps the header's view state. Shift later headers when
+    /// lines move, and drop overrides when their header/schema is replaced.
+    pub(super) fn adjust_table_widths(&mut self, range: &Range<usize>, replacement: &str) {
+        if self.table_widths.is_empty() {
             return;
-        };
-        // The header row's committed display widths already carry the live drag.
-        let Some(t) = self
-            .table_rows
-            .get(resize.header_row)
-            .and_then(Option::as_ref)
-        else {
-            return;
-        };
-        let mut widths: Vec<f32> = t.col_widths.iter().map(|w| f32::from(*w)).collect();
-        if let Some(w) = widths.get_mut(resize.col) {
-            *w = resize.width.max(24.);
         }
-        let marker = zorite_markdown::syntax::table_marker_text(region.style, Some(&widths));
-        self.rewrite_table_marker(&region, marker, cx);
+        let (first, column) = self.row_col(range.start);
+        let last = self.row_col(range.end).0;
+        let added = replacement.bytes().filter(|&c| c == b'\n').count();
+        if first == last && added == 0 {
+            if self.content[range.clone()].contains('|') || replacement.contains('|') {
+                self.table_widths.remove(&first);
+            }
+            return;
+        }
+        let shift = added as isize - (last - first) as isize;
+        // Inserting complete lines just before a header keeps that header.
+        let suffix = last
+            + usize::from(
+                !(self.line_starts()[last] == range.end
+                    && (replacement.ends_with('\n') || (column == 0 && replacement.is_empty()))),
+            );
+        self.table_widths = self
+            .table_widths
+            .drain()
+            .filter_map(|(row, widths)| {
+                if row < first {
+                    Some((row, widths))
+                } else if row >= suffix {
+                    Some((row.saturating_add_signed(shift), widths))
+                } else {
+                    None
+                }
+            })
+            .collect();
+    }
+
+    /// History restores a complete snapshot. Isolate its UTF-8 edit before
+    /// moving view-local widths, keeping ordinary edits inside a header intact.
+    pub(super) fn restore_table_widths(&mut self, target: &str) {
+        if self.table_widths.is_empty() {
+            return;
+        }
+        let prefix: usize = self
+            .content
+            .chars()
+            .zip(target.chars())
+            .take_while(|(a, b)| a == b)
+            .map(|(c, _)| c.len_utf8())
+            .sum();
+        let suffix: usize = self.content[prefix..]
+            .chars()
+            .rev()
+            .zip(target[prefix..].chars().rev())
+            .take_while(|(a, b)| a == b)
+            .map(|(c, _)| c.len_utf8())
+            .sum();
+        self.adjust_table_widths(
+            &(prefix..self.content.len() - suffix),
+            &target[prefix..target.len() - suffix],
+        );
+    }
+
+    pub(super) fn set_table_width(&mut self, header: usize, col: usize, width: f32) {
+        let widths = self.table_widths.entry(header).or_default();
+        if widths.len() <= col {
+            widths.resize(col + 1, None);
+        }
+        widths[col] = Some(width.max(24.));
+        self.shape_caches.region_cols.get_mut().take();
+        self.shape_memo.get_mut().take();
     }
 
     /// The caret's table position as `(row, cell_index, grapheme_index)`, or
@@ -1063,21 +1086,80 @@ fn cell_run_slice(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
         .collect()
 }
 
-/// Intrinsic preferred width and longest-word width, both measured using the
-/// actual projected style runs. Shrink flexible columns to the viewport only
-/// while words still fit; otherwise retain a horizontally scrollable grid.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn table_column_widths(
+/// Projected text widths, independent of available space and cell padding.
+pub(crate) struct TableMetrics {
+    minimum: Vec<f32>,
+    preferred: Vec<f32>,
+}
+
+pub(super) struct TableColumns {
+    pub(super) widths: std::rc::Rc<[Pixels]>,
+    pub(super) pad: Pixels,
+}
+
+impl TableMetrics {
+    pub(super) fn allocate(
+        &self,
+        available: Option<Pixels>,
+        fixed: impl Fn(usize) -> Option<f32>,
+    ) -> TableColumns {
+        // Keep requested outer widths stable. Only flexible columns contribute
+        // padding that can be reclaimed when the grid is just too wide.
+        let budget = available.map(f32::from);
+        let fair = budget.unwrap_or(f32::INFINITY) / self.minimum.len() as f32;
+        let mut reserved = 0.;
+        let mut flexible = 0;
+        let mut pad_limit = TABLE_CELL_PAD;
+        let mut minimum = self.minimum.clone();
+        let mut preferred = self.preferred.clone();
+        for (col, text_min) in self.minimum.iter().enumerate() {
+            if let Some(requested) = fixed(col) {
+                let width = requested.max(text_min + MIN_TABLE_CELL_PAD * 2.);
+                pad_limit = pad_limit.min((width - text_min) / 2.);
+                minimum[col] = width;
+                preferred[col] = width;
+                reserved += width;
+            } else {
+                reserved += if preferred[col] + MIN_TABLE_CELL_PAD * 2. <= fair {
+                    preferred[col]
+                } else {
+                    *text_min
+                };
+                flexible += 1;
+            }
+        }
+        let pad = budget.filter(|_| flexible > 0).map_or(TABLE_CELL_PAD, |w| {
+            ((w - reserved) / (2. * flexible as f32))
+                .floor()
+                .clamp(MIN_TABLE_CELL_PAD, TABLE_CELL_PAD)
+        });
+        let pad = pad.min(pad_limit);
+        for col in 0..minimum.len() {
+            if fixed(col).is_none() {
+                minimum[col] += pad * 2.;
+                preferred[col] += pad * 2.;
+            }
+        }
+        let widths = crate::table_layout::column_widths(&minimum, &preferred, budget)
+            .into_iter()
+            .map(px)
+            .collect();
+        TableColumns {
+            widths,
+            pad: px(pad),
+        }
+    }
+}
+
+pub(super) fn measure_table_columns(
     editor: &EditorState,
     region: &markdown_syntax::TableRegion,
     window: &mut Window,
     base_font: &Font,
     font_size: Pixels,
     color: Hsla,
-    col_resize: Option<TableColResize>,
-    available: Option<Pixels>,
     style: Option<&SyntaxStyle>,
-) -> Vec<Pixels> {
+) -> TableMetrics {
     let cols = region
         .lines
         .clone()
@@ -1087,9 +1169,8 @@ pub(crate) fn table_column_widths(
         .unwrap_or(0)
         .max(region.aligns.len())
         .max(1);
-    let padding = TABLE_CELL_PAD * 2.;
     let em = f32::from(measure_width(window, "m", base_font, font_size)).ceil();
-    let mut minimum = vec![em + padding; cols];
+    let mut minimum = vec![em; cols];
     let mut preferred = minimum.clone();
     for li in region
         .lines
@@ -1107,7 +1188,7 @@ pub(crate) fn table_column_widths(
                 window
                     .text_system()
                     .shape_line(cell.text.clone(), font_size, &cell.runs, None);
-            preferred[c] = preferred[c].max(f32::from(shaped.width()).ceil() + padding);
+            preferred[c] = preferred[c].max(f32::from(shaped.width()).ceil());
             for (offset, word) in cell
                 .text
                 .split_word_bound_indices()
@@ -1118,28 +1199,16 @@ pub(crate) fn table_column_widths(
                     .text_system()
                     .shape_line(word.to_owned().into(), font_size, &runs, None)
                     .width();
-                minimum[c] = minimum[c].max(f32::from(width).ceil() + padding);
+                minimum[c] = minimum[c].max(f32::from(width).ceil());
             }
         }
     }
-    if let Some(widths) = &region.col_widths_attr {
-        for (c, &width) in widths.iter().enumerate().take(cols) {
-            preferred[c] = width.max(minimum[c]);
-            minimum[c] = preferred[c];
-        }
-    }
-    if let Some(r) = col_resize.filter(|r| r.header_row == region.lines.start && r.col < cols) {
-        preferred[r.col] = r.width.max(minimum[r.col]);
-        minimum[r.col] = preferred[r.col];
-    }
-    crate::table_layout::column_widths(&minimum, &preferred, available.map(f32::from))
-        .into_iter()
-        .map(px)
-        .collect()
+    TableMetrics { minimum, preferred }
 }
 
 /// Horizontal inset (px) of a table cell's text from its column's left edge.
 pub(crate) const TABLE_CELL_PAD: f32 = 10.;
+const MIN_TABLE_CELL_PAD: f32 = 4.;
 /// Left indent for tables, so per-row delete "−" handles sit in a gutter beside the
 /// grid instead of over the first cell (issue #16).
 pub(crate) const TABLE_GUTTER: f32 = 22.;
@@ -1182,6 +1251,16 @@ pub(crate) struct TableThumb {
     /// Content px scrolled per px of thumb travel.
     pub(crate) factor: f32,
     pub(crate) color: Hsla,
+}
+
+/// Ignore subpixel summation noise when adding proportional column widths.
+pub(super) fn table_overflow(total: Pixels, available: Pixels) -> Pixels {
+    let overflow = total - available;
+    if overflow > px(0.001) {
+        overflow
+    } else {
+        px(0.)
+    }
 }
 
 /// The table content's LEFT x, given the note column's `origin`/`width`, the
@@ -1259,17 +1338,16 @@ pub(crate) fn cell_span_width(col_widths: &[Pixels], cells_len: usize, c: usize)
 
 pub(crate) fn table_row_wrap_rows(
     window: &mut Window,
-    cells: &[ProjectedCell],
-    col_widths: &[Pixels],
+    table: &TableRow,
     font_size: Pixels,
 ) -> usize {
-    let pad = px(TABLE_CELL_PAD);
+    let pad = table.pad;
     let mut rows = 1;
-    for (c, cell) in cells.iter().enumerate() {
+    for (c, cell) in table.projected.iter().enumerate() {
         if cell.text.is_empty() {
             continue;
         }
-        let cw = cell_span_width(col_widths, cells.len(), c);
+        let cw = cell_span_width(&table.col_widths, table.projected.len(), c);
         if cw == px(0.) {
             continue;
         }
@@ -1304,7 +1382,7 @@ pub(crate) fn table_caret_pos(
     if t.cell_ranges.is_empty() {
         return None;
     }
-    let pad = px(TABLE_CELL_PAD);
+    let pad = t.pad;
     let cell = table_cell_at(&t.cell_ranges, col);
     let range = t.cell_ranges.get(cell)?;
     let content = t.projected.get(cell)?;
@@ -1458,7 +1536,7 @@ pub(crate) fn paint_table_row(
     if top_divider {
         window.paint_quad(fill(Bounds::new(origin, size(table_w, thick)), t.border));
     }
-    let pad = px(TABLE_CELL_PAD);
+    let pad = t.pad;
     for (c, &cw) in t.col_widths.iter().enumerate() {
         let x = origin.x + col_offset(&t.col_widths, t.cells.len(), c, t.rtl);
         // Inner cell separator at the left of every cell except the first (Grid

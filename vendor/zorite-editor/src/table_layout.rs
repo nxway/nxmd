@@ -22,11 +22,31 @@ pub(crate) fn column_widths(
     if min_total >= available {
         return minimum.to_vec();
     }
-    let share = (available - min_total) / (preferred_total - min_total);
+    // Columns whose whole contents fit in an equal share (short labels,
+    // numbers, units) get their small deficit first. Prose shares the rest.
+    let fair = available / minimum.len() as f32;
+    let compact_extra: f32 = minimum
+        .iter()
+        .zip(&preferred)
+        .filter(|(_, p)| **p <= fair)
+        .map(|(m, p)| p - m)
+        .sum();
+    let spare = available - min_total;
+    let compact_share = if compact_extra > spare {
+        spare / compact_extra
+    } else {
+        1.
+    };
+    let flexible_extra = preferred_total - min_total - compact_extra;
+    let share = if flexible_extra > 0. {
+        (spare - compact_extra).max(0.) / flexible_extra
+    } else {
+        0.
+    };
     minimum
         .iter()
         .zip(preferred)
-        .map(|(&m, p)| m + (p - m) * share)
+        .map(|(&m, p)| m + (p - m) * if p <= fair { compact_share } else { share })
         .collect()
 }
 /// Visit the selected horizontal interval on each visual row. Wrap boundaries
@@ -144,7 +164,7 @@ mod tests {
     fn uses_available_space_without_crushing_words() {
         let widths = column_widths(&[60., 100., 80.], &[80., 700., 100.], Some(600.));
         assert!((widths.iter().sum::<f32>() - 600.).abs() < 0.01);
-        assert!(widths[1] > 400.);
+        assert_eq!((widths[0], widths[2]), (80., 100.));
         assert!(widths.iter().zip([60., 100., 80.]).all(|(&w, m)| w >= m));
     }
     #[test]

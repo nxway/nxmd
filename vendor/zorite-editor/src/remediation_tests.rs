@@ -496,9 +496,223 @@ fn exercise_table_layout(cx: &mut gpui::TestAppContext) {
         assert_eq!(scan.tables.len(), 2);
         let style = markdown_syntax::tests::test_style();
         for region in &scan.tables {
-            let cols = table_column_widths(e, region, w, &w.text_style().font(), px(18.), Hsla::default(), None, Some(px(400.)), Some(&style));
+            let metrics = tables::measure_table_columns(
+                e,
+                region,
+                w,
+                &w.text_style().font(),
+                px(18.),
+                Hsla::default(),
+                Some(&style),
+            );
+            let cols = metrics.allocate(Some(px(400.)), |_| None).widths;
             let total: Pixels = cols.iter().copied().sum();
-            assert!(total <= px(400.), "table at row {} occupies {total:?} of 400px", region.lines.start);
+            assert!(
+                total <= px(400.),
+                "table at row {} occupies {total:?} of 400px",
+                region.lines.start
+            );
         }
     });
+}
+
+#[gpui::test]
+fn table_reflow_keeps_hits_selection_and_source(cx: &mut gpui::TestAppContext) {
+    let source = include_str!("../../../tests/fixtures/responsive-exercise-tables.md");
+    let view = cx.open_window(size(px(444.), px(700.)), |w, cx| {
+        let mut e = EditorState::new(w, cx).with_text(source);
+        e.set_markdown_style(markdown_syntax::tests::test_style(), cx);
+        e.focus(w, cx);
+        e
+    });
+    let draw = |cx: &mut gpui::TestAppContext| {
+        cx.update_window(view.into(), |_, w, cx| {
+            w.refresh();
+            w.draw(cx).clear(cx);
+        })
+        .unwrap();
+    };
+    for width in [230., 444., 760., 444.] {
+        cx.simulate_window_resize(view.into(), size(px(width), px(700.)));
+        draw(cx);
+        view.update(cx, |e, w, _| {
+            let bounds = e.last_bounds.unwrap();
+            let a = e.table_rows[2].as_ref().unwrap();
+            let body = e.table_rows[4].as_ref().unwrap();
+            let b = e.table_rows[13].as_ref().unwrap();
+            assert!(std::rc::Rc::ptr_eq(&a.col_widths, &body.col_widths));
+            assert!(!std::rc::Rc::ptr_eq(&a.col_widths, &b.col_widths));
+            assert_eq!(!e.table_thumbs.is_empty(), width == 230.);
+            if width >= 444. {
+                assert!(a.col_widths[4] > a.col_widths[1] && a.col_widths[0] > a.col_widths[2]);
+                // Keep the longest rep range (30–45s) on a single visual line.
+                let plank = e.table_rows[9].as_ref().unwrap();
+                let inner = plank.col_widths[2] - plank.pad * 2.;
+                let reps =
+                    tables::shape_cell(w, &plank.projected[2], e.font_size, Some(inner)).unwrap();
+                assert!(reps.wrap_boundaries().is_empty());
+                // The end of Notes is on a continuation line. Hit that actual
+                // caret and round-trip the mapped source offset after resize.
+                let pos = source.find("movement").unwrap() + 3;
+                let col = pos - e.line_starts()[4];
+                let (x, y, cell, _) = table_caret_pos(
+                    body,
+                    col,
+                    e.table_left(body, 4, &bounds),
+                    &e.paint_font.clone().unwrap(),
+                    e.font_size,
+                    w,
+                )
+                .unwrap();
+                assert_eq!(cell, 4);
+                assert!(y > px(0.) && e.line_h(4) >= y + e.font_size * LINE_HEIGHT_RATIO);
+                assert!(x < bounds.right() - px(TABLE_GUTTER));
+                let hit = point(x, bounds.top() + e.line_tops[4] + px(7.) + y);
+                assert_eq!(e.table_offset_at(hit, w), Some(pos));
+            }
+            assert_eq!(e.text().as_bytes(), source.as_bytes());
+        })
+        .unwrap();
+    }
+    let start = source.find("Hold dumbbell").unwrap();
+    let end = source.find("movement").unwrap() + "movement".len();
+    let copied = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+    view.update(cx, |e, w, cx| {
+        let result = copied.clone();
+        e.set_clipboard_writer(std::rc::Rc::new(move |s, _| {
+            *result.borrow_mut() = s.to_owned()
+        }));
+        e.selected_range = start..end;
+        e.copy(&Copy, w, cx);
+        assert_eq!(copied.borrow().as_str(), &source[start..end]);
+        e.replace_text_in_range(None, "Жим 中文 👩‍💻", w, cx);
+    })
+    .unwrap();
+    draw(cx);
+    let edited_height = view
+        .update(cx, |e, w, cx| {
+            assert_eq!(
+                e.text(),
+                source.replacen(&source[start..end], "Жим 中文 👩‍💻", 1)
+            );
+            let height = e.line_h(4);
+            e.undo(&Undo, w, cx);
+            assert_eq!(e.text(), source);
+            height
+        })
+        .unwrap();
+    draw(cx);
+    view.update(cx, |e, w, cx| {
+        assert!(e.line_h(4) > edited_height);
+        e.redo(&Redo, w, cx);
+        assert_eq!(e.cursor_offset(), start + "Жим 中文 👩‍💻".len());
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn manual_table_widths_are_view_local(cx: &mut gpui::TestAppContext) {
+    let source = "<!-- table:grid cols=140,80 -->\n| Name | Value |\n| --- | --- |\n| one | two |\n\n| Name | Value |\n| --- | --- |\n| abc | xyz |";
+    let view = cx.open_window(size(px(500.), px(400.)), |w, cx| {
+        let mut e = EditorState::new(w, cx).with_text(source);
+        e.set_markdown_style(markdown_syntax::tests::test_style(), cx);
+        e
+    });
+    let draw = |cx: &mut gpui::TestAppContext| {
+        cx.update_window(view.into(), |_, w, cx| {
+            w.refresh();
+            w.draw(cx).clear(cx);
+        })
+        .unwrap();
+    };
+    draw(cx);
+    view.update(cx, |e, w, cx| {
+        assert_eq!(
+            &*e.table_rows[1].as_ref().unwrap().col_widths,
+            &[px(140.), px(80.)]
+        );
+        e.table_col_resize = Some(TableColResize {
+            header_row: 1,
+            col: 1,
+            start_x: px(0.),
+            orig: 80.,
+            width: 240.,
+        });
+        e.on_mouse_up(&Default::default(), w, cx);
+        assert_eq!(e.text(), source);
+        assert!(e.undo_stack.is_empty());
+        e.replace_range(0..0, "Intro\n", cx);
+    })
+    .unwrap();
+    draw(cx);
+    view.update(cx, |e, w, cx| {
+        assert_eq!(
+            &*e.table_rows[2].as_ref().unwrap().col_widths,
+            &[px(140.), px(240.)]
+        );
+        assert!(e.table_rows[6].as_ref().unwrap().col_widths[1] < px(100.));
+        e.undo(&Undo, w, cx);
+    })
+    .unwrap();
+    draw(cx);
+    view.update(cx, |e, w, cx| {
+        let pos = e.text().find("Name").unwrap();
+        e.replace_range(pos..pos + 4, "名前", cx);
+        e.undo(&Undo, w, cx);
+    })
+    .unwrap();
+    draw(cx);
+    view.update(cx, |e, _, _| {
+        assert_eq!(e.text(), source);
+        assert_eq!(e.table_rows[1].as_ref().unwrap().col_widths[1], px(240.));
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn oversized_table_scroll_clamps_after_resize(cx: &mut gpui::TestAppContext) {
+    let token =
+        "https://example.com/abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz";
+    let row = format!("| Жим | 中文 | 👩‍💻 | 60s | {token} | end |");
+    let source = format!(
+        "| Exercise | Sets | Reps | Rest | URL | Cue |\n| --- | --- | --- | --- | --- | --- |\n{}",
+        vec![row.as_str(); 40].join("\n")
+    );
+    let view = cx.open_window(size(px(350.), px(300.)), |w, cx| {
+        let mut e = EditorState::new(w, cx).with_text(&source);
+        e.set_markdown_style(markdown_syntax::tests::test_style(), cx);
+        e
+    });
+    for width in [350., 1800., 350.] {
+        cx.simulate_window_resize(view.into(), size(px(width), px(300.)));
+        cx.update_window(view.into(), |_, w, cx| {
+            w.refresh();
+            w.draw(cx).clear(cx);
+        })
+        .unwrap();
+        view.update(cx, |e, _, _| {
+            let t = e.table_rows[0].as_ref().unwrap();
+            let total: Pixels = t.col_widths.iter().copied().sum();
+            let bounds = e.last_bounds.unwrap();
+            if width == 350. {
+                assert_eq!(e.table_thumbs.len(), 1);
+                assert!(t.col_widths[4] > bounds.size.width);
+                assert!(e.line_tops[40] > px(300.));
+                assert_eq!(
+                    e.table_left(t, 0, &bounds),
+                    bounds.left() + px(TABLE_GUTTER)
+                );
+                e.table_scroll_x.insert(0, f32::from(total));
+                assert!(
+                    (e.table_left(t, 0, &bounds) + total - (bounds.right() - px(TABLE_GUTTER)))
+                        .abs()
+                        < px(0.01)
+                );
+            } else {
+                assert!(e.table_thumbs.is_empty() && e.table_scroll_x.is_empty());
+            }
+            assert_eq!(e.text(), source);
+        })
+        .unwrap();
+    }
 }
