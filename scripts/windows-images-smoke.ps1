@@ -40,12 +40,14 @@ $shot=Capture-Images 'image-embeds.png';$shot.Dispose()
 [System.Windows.Forms.SendKeys]::SendWait('{END}')
 [System.Windows.Forms.SendKeys]::SendWait(' ')
 [System.Windows.Forms.SendKeys]::SendWait('^s')
-Start-Sleep -Milliseconds 300
-if ((Get-FileHash $imageNote).Hash -eq $imageSourceHash) { throw 'Caret edit did not reach Obsidian embed source' }
+Wait-ImageCondition {
+    $editedHash = Read-SmokeSnapshot $imageNote -Hash
+    $editedHash -and $editedHash -ne $imageSourceHash
+} 'Caret edit did not reach Obsidian embed source'
 [System.Windows.Forms.SendKeys]::SendWait('^z')
 [System.Windows.Forms.SendKeys]::SendWait('^s')
-Start-Sleep -Milliseconds 300
-if ((Get-FileHash $imageNote).Hash -ne $imageSourceHash) { throw 'Obsidian source edit/undo changed original bytes' }
+Wait-SavedText $imageNote $imageSource 'Obsidian embed undo restored the saved source'
+if ((Read-SmokeSnapshot $imageNote -Hash) -ne $imageSourceHash) { throw 'Obsidian source edit/undo changed original bytes' }
 # Actual Windows bitmap clipboard -> native GPUI paste -> vault-local PNG.
 [System.Windows.Forms.SendKeys]::SendWait('^{END}')
 $clip=[Drawing.Bitmap]::new(72,48);$g=[Drawing.Graphics]::FromImage($clip)
