@@ -29,7 +29,7 @@ enum TabContent {
     Markdown {
         doc: Document,
         editor: Entity<EditorState>,
-        _subscription: Subscription,
+        subscription: Option<Subscription>,
     },
     Image,
 }
@@ -99,6 +99,13 @@ impl Workspace {
                     }
                 }
                 this.persist();
+                // Windows may deliver a final IME result while destroying the
+                // window. The saves above are final once this close is accepted.
+                for tab in &mut this.tabs {
+                    if let TabContent::Markdown { subscription, .. } = &mut tab.content {
+                        subscription.take();
+                    }
+                }
                 true
             })
             .unwrap_or(true)
@@ -321,7 +328,7 @@ impl Workspace {
                     content: TabContent::Markdown {
                         doc,
                         editor,
-                        _subscription: subscription,
+                        subscription: Some(subscription),
                     },
                     dirty: None,
                     issue: None,

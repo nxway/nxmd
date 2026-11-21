@@ -93,7 +93,7 @@ struct Review {
     last: Instant,
     status: String,
     busy: bool,
-    _sub: Subscription,
+    subscription: Option<Subscription>,
     _timer: Task<()>,
 }
 impl Review {
@@ -109,7 +109,15 @@ impl Review {
         });
         let weak = cx.entity().downgrade();
         w.on_window_should_close(cx, move |_, cx| {
-            weak.update(cx, |s, cx| s.flush(cx)).unwrap_or(true)
+            weak.update(cx, |s, cx| {
+                if !s.flush(cx) {
+                    return false;
+                }
+                // Ignore native input delivered after the final checkpoint.
+                s.subscription.take();
+                true
+            })
+            .unwrap_or(true)
         });
         let timer = cx.spawn(async move |this, cx| {
             loop {
@@ -149,7 +157,7 @@ impl Review {
             last: Instant::now(),
             status: format!("{disk_status}. Save a separate copy or close to keep this draft."),
             busy: false,
-            _sub: sub,
+            subscription: Some(sub),
             _timer: timer,
         }
     }

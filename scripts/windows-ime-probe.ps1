@@ -107,14 +107,18 @@ Start-Sleep -Milliseconds 200
 Start-Sleep -Milliseconds 1200
 Check-ImeDisk $text 'cancelled'
 Assert-ImeSelection $text
-Select-ImeFixture $text
-Type-Ka
-Check-ImeDisk $text 'beforeClose'
-if (!$process.CloseMainWindow() -or !$process.WaitForExit(10000)) { throw 'Window did not close during composition' }
-Check-ImeDisk $text 'afterClose'
-Restart-ImeApp
-[System.Windows.Forms.Clipboard]::SetText([guid]::NewGuid().ToString())
-Assert-EditorText $text
+# Exercise the race between the accepted close, the final IME result, and
+# the workspace checkpoint timer on several independently opened windows.
+foreach ($round in 1..6) {
+    Select-ImeFixture $text
+    Type-Ka
+    Check-ImeDisk $text "beforeClose$round"
+    if (!$process.CloseMainWindow() -or !$process.WaitForExit(10000)) { throw 'Window did not close during composition' }
+    Check-ImeDisk $text "afterClose$round"
+    Restart-ImeApp
+    [System.Windows.Forms.Clipboard]::SetText([guid]::NewGuid().ToString())
+    Assert-EditorText $text
+}
 
 # Keep a real pre-existing dirty generation alive by publishing a disk conflict.
 $external = 'external 版本'
@@ -148,6 +152,15 @@ $mainWindow = [NativeSmoke]::GetForegroundWindow()
 Assert-EditorText $dirty
 $record.recoveredEditor = $dirty
 $record.afterRecovery = Read-ImeEvidence
+Enable-JapaneseInput
+Select-ImeFixture $dirty
+Type-Ka
+[void][NativeSmoke]::SendMessage($mainWindow,0x10,[IntPtr]::Zero,[IntPtr]::Zero)
+Wait-ImageCondition { ![NativeSmoke]::IsWindowVisible($mainWindow) } 'Recovery review did not close'
+$record.afterReviewClose = Read-ImeEvidence
+Record-Ime
+if ($record.afterReviewClose.disk -cne $external -or $record.afterReviewClose.drafts.Count -ne 1 -or
+    $record.afterReviewClose.drafts[0] -cne $dirty) { throw 'Closing recovery review persisted unfinished composition' }
 $record.status = 'PASS'
 $record.reason = 'Physical Japanese input, cancel, single commit, undo, clean close and crash recovery verified'
 Record-Ime
