@@ -475,7 +475,10 @@ try {
 } finally {
     $env:NXMD_DIAGNOSTICS=$previousDiagnostics
     $env:LOCALAPPDATA = $originalLocalAppData
-    if ($process -and !$process.HasExited) { Stop-Process -Id $process.Id -Force }
+    if ($process -and !$process.HasExited) {
+        Stop-Process -InputObject $process -Force
+        if (!$process.WaitForExit(15000)) { throw "Smoke process still owns its temporary profile" }
+    }
     if (Test-Path (Join-Path $config 'logs')) { Copy-Item (Join-Path $config 'logs') (Join-Path $resultDir 'logs') -Recurse -Force }
     Remove-Item -Recurse -Force $root
 }
