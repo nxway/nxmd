@@ -611,62 +611,97 @@ fn table_reflow_keeps_hits_selection_and_source(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn manual_table_widths_are_view_local(cx: &mut gpui::TestAppContext) {
-    let source = "<!-- table:grid cols=140,80 -->\n| Name | Value |\n| --- | --- |\n| one | two |\n\n| Name | Value |\n| --- | --- |\n| abc | xyz |";
-    let view = cx.open_window(size(px(500.), px(400.)), |w, cx| {
-        let mut e = EditorState::new(w, cx).with_text(source);
-        e.set_markdown_style(markdown_syntax::tests::test_style(), cx);
-        e
-    });
-    let draw = |cx: &mut gpui::TestAppContext| {
-        cx.update_window(view.into(), |_, w, cx| {
+fn manual_table_widths_survive_save_close_and_reopen(cx: &mut gpui::TestAppContext) {
+    let source = "| Name | Value |\r\n| --- | --- |\r\n| one | two |\r\n\r\n| Name | Value |\r\n| --- | --- |\r\n| abc | 日本語 |";
+    let open = |cx: &mut gpui::TestAppContext, text: String| {
+        cx.open_window(size(px(500.), px(400.)), |w, cx| {
+            let mut e = EditorState::new(w, cx).with_text(text);
+            e.set_markdown_style(markdown_syntax::tests::test_style(), cx);
+            e
+        })
+    };
+    let view = open(cx, source.to_owned());
+    cx.update_window(view.into(), |_, w, cx| {
+        w.refresh();
+        w.draw(cx).clear(cx);
+    })
+    .unwrap();
+    let saved = view
+        .update(cx, |e, w, cx| {
+            let width = f32::from(e.table_rows[0].as_ref().unwrap().col_widths[1]);
+            let start = source.find("日本語").unwrap();
+            e.selected_range = start..start + "日本".len();
+            e.selection_reversed = true;
+            let mut drag = TableColResize {
+                header_row: 0,
+                col: 1,
+                start_x: px(0.),
+                orig: width,
+                width,
+            };
+            e.table_col_resize = Some(drag);
+            e.on_mouse_up(&Default::default(), w, cx);
+            assert_eq!(e.text(), source);
+            assert!(e.undo_stack.is_empty());
+            drag.width = 240.;
+            e.table_col_resize = Some(drag);
+            e.on_mouse_up(&Default::default(), w, cx);
+            let persisted = e.text().to_owned();
+            let (marker, rest) = persisted.split_once("\r\n").unwrap();
+            assert!(
+                marker.starts_with("<!-- table:grid cols=") && marker.ends_with(",240 -->"),
+                "{marker}"
+            );
+            assert_eq!(rest.as_bytes(), source.as_bytes());
+            assert_eq!(&persisted[e.selected_range.clone()], "日本");
+            assert!(e.selection_reversed);
+            e.undo(&Undo, w, cx);
+            assert_eq!(e.text(), source);
+            e.redo(&Redo, w, cx);
+            assert_eq!(e.text(), persisted);
+            w.remove_window();
+            persisted
+        })
+        .unwrap();
+    // A new window and state have no geometry or history from the drag.
+    let reopened = open(cx, saved.clone());
+    for width in [360., 720.] {
+        cx.simulate_window_resize(reopened.into(), size(px(width), px(400.)));
+        cx.update_window(reopened.into(), |_, w, cx| {
             w.refresh();
             w.draw(cx).clear(cx);
         })
         .unwrap();
-    };
-    draw(cx);
-    view.update(cx, |e, w, cx| {
-        assert_eq!(
-            &*e.table_rows[1].as_ref().unwrap().col_widths,
-            &[px(140.), px(80.)]
-        );
-        e.table_col_resize = Some(TableColResize {
-            header_row: 1,
-            col: 1,
-            start_x: px(0.),
-            orig: 80.,
-            width: 240.,
-        });
-        e.on_mouse_up(&Default::default(), w, cx);
-        assert_eq!(e.text(), source);
-        assert!(e.undo_stack.is_empty());
-        e.replace_range(0..0, "Intro\n", cx);
-    })
-    .unwrap();
-    draw(cx);
-    view.update(cx, |e, w, cx| {
-        assert_eq!(
-            &*e.table_rows[2].as_ref().unwrap().col_widths,
-            &[px(140.), px(240.)]
-        );
-        assert!(e.table_rows[6].as_ref().unwrap().col_widths[1] < px(100.));
-        e.undo(&Undo, w, cx);
-    })
-    .unwrap();
-    draw(cx);
-    view.update(cx, |e, w, cx| {
-        let pos = e.text().find("Name").unwrap();
-        e.replace_range(pos..pos + 4, "名前", cx);
-        e.undo(&Undo, w, cx);
-    })
-    .unwrap();
-    draw(cx);
-    view.update(cx, |e, _, _| {
-        assert_eq!(e.text(), source);
-        assert_eq!(e.table_rows[1].as_ref().unwrap().col_widths[1], px(240.));
-    })
-    .unwrap();
+        reopened
+            .update(cx, |e, _, _| {
+                assert_eq!(e.table_rows[1].as_ref().unwrap().col_widths[1], px(240.));
+                assert!(e.table_rows[5].as_ref().unwrap().col_widths[1] < px(100.));
+                assert!(e.undo_stack.is_empty());
+                assert_eq!(e.text().as_bytes(), saved.as_bytes());
+            })
+            .unwrap();
+    }
+    reopened
+        .update(cx, |e, w, cx| {
+            // Replace a previously authored marker in place. Later edits move its
+            // table and undo restores it without transferring widths to table two.
+            let drag = TableColResize {
+                header_row: 1,
+                col: 1,
+                start_x: px(0.),
+                orig: 240.,
+                width: 125.,
+            };
+            e.table_col_resize = Some(drag);
+            e.on_mouse_up(&Default::default(), w, cx);
+            assert_eq!(e.text(), saved.replacen(",240 -->", ",125 -->", 1));
+            e.replace_range(0..0, "Intro\r\n", cx);
+            assert_eq!(e.scan_data().tables[0].lines.start, 2);
+            e.undo(&Undo, w, cx);
+            e.undo(&Undo, w, cx);
+            assert_eq!(e.text(), saved);
+        })
+        .unwrap();
 }
 
 #[gpui::test]

@@ -2962,12 +2962,10 @@ fn shape_document(
                     .zip(&metrics.as_ref().unwrap().1)
                     .map(|(r, m)| {
                         let header = r.lines.start;
-                        let manual = editor.table_widths.get(&header);
                         m.allocate(available, |col| {
                             col_resize
                                 .filter(|d| d.header_row == header && d.col == col)
                                 .map(|d| d.width)
-                                .or_else(|| manual.and_then(|v| v.get(col).copied().flatten()))
                                 .or_else(|| r.col_widths_attr.as_ref()?.get(col).copied())
                         })
                     })

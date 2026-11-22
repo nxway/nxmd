@@ -742,39 +742,23 @@ impl EditorState {
             ),
             (None, None) => return,
         };
-        let cell_pos = self.caret_table_cell_pos();
-        let old_caret = self.selected_range.start;
-        // The marker edit adds/removes one line ABOVE the table (or replaces in
-        // place) — shift the caret's row index to keep it in its cell.
-        let row_shift: isize = match (region.marker_line, new.is_empty()) {
-            (Some(_), true) => -1,
-            (None, false) => 1,
-            _ => 0,
+        if self.content[range.clone()] == new {
+            return;
+        }
+        // The edit only touches the marker. Shift both selection endpoints by
+        // its byte delta, including when the selection is in another table.
+        let shift = |offset: usize| {
+            if offset >= range.end {
+                offset - range.len() + new.len()
+            } else {
+                offset.min(range.start)
+            }
         };
+        let selection = shift(self.selected_range.start)..shift(self.selected_range.end);
         self.record_edit(&range, &new);
         self.content.replace_range(range.clone(), &new);
         self.remap_diagnostics(&range, new.len());
-        let caret = match cell_pos {
-            Some((row, cell, in_cell)) => {
-                let same_row = (row as isize + row_shift).max(0) as usize;
-                self.caret_pos_for_cell(same_row, cell, in_cell)
-            }
-            // Caret wasn't in this table (e.g. a border drag from elsewhere):
-            // keep it where it was, shifted by the edit's byte delta — seating
-            // it "in a cell" would land it on the marker line and reveal it.
-            None => {
-                let delta = new.len() as isize - (range.end - range.start) as isize;
-                if old_caret >= range.end {
-                    (old_caret as isize + delta).max(0) as usize
-                } else if old_caret > range.start {
-                    range.start + new.len()
-                } else {
-                    old_caret
-                }
-            }
-        };
-        let caret = caret.min(self.content.len());
-        self.selected_range = caret..caret;
+        self.selected_range = selection;
         self.table_menu = None;
         cx.emit(EditorEvent::Changed);
         cx.notify();
@@ -795,7 +779,7 @@ impl EditorState {
 
     /// Double-click on a column border: auto-fit the column to its widest
     /// content (Excel's AutoFit). Measures the region with explicit widths
-    /// ignored, then applies the natural width through the same view-local path
+    /// ignored, then writes the natural width through the same marker path
     /// as a drag release.
     pub(crate) fn autofit_table_col(
         &mut self,
@@ -832,81 +816,40 @@ impl EditorState {
         let Some(&width) = natural.preferred.get(col) else {
             return;
         };
-        self.set_table_width(header_row, col, width + TABLE_CELL_PAD * 2.);
+        self.persist_table_width(header_row, col, width + TABLE_CELL_PAD * 2., cx);
         cx.notify();
     }
 
-    /// A body edit keeps the header's view state. Shift later headers when
-    /// lines move, and drop overrides when their header/schema is replaced.
-    pub(super) fn adjust_table_widths(&mut self, range: &Range<usize>, replacement: &str) {
-        if self.table_widths.is_empty() {
+    /// The existing marker format stores one list of widths in display order.
+    pub(super) fn persist_table_width(
+        &mut self,
+        header: usize,
+        col: usize,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if self.composition.is_some() {
             return;
         }
-        let (first, column) = self.row_col(range.start);
-        let last = self.row_col(range.end).0;
-        let added = replacement.bytes().filter(|&c| c == b'\n').count();
-        if first == last && added == 0 {
-            if self.content[range.clone()].contains('|') || replacement.contains('|') {
-                self.table_widths.remove(&first);
-            }
+        let scan = self.scan_data();
+        let Some(region) = scan.tables.iter().find(|r| r.lines.start == header) else {
             return;
-        }
-        let shift = added as isize - (last - first) as isize;
-        // Inserting complete lines just before a header keeps that header.
-        let suffix = last
-            + usize::from(
-                !(self.line_starts()[last] == range.end
-                    && (replacement.ends_with('\n') || (column == 0 && replacement.is_empty()))),
-            );
-        self.table_widths = self
-            .table_widths
-            .drain()
-            .filter_map(|(row, widths)| {
-                if row < first {
-                    Some((row, widths))
-                } else if row >= suffix {
-                    Some((row.saturating_add_signed(shift), widths))
-                } else {
-                    None
-                }
-            })
-            .collect();
-    }
-
-    /// History restores a complete snapshot. Isolate its UTF-8 edit before
-    /// moving view-local widths, keeping ordinary edits inside a header intact.
-    pub(super) fn restore_table_widths(&mut self, target: &str) {
-        if self.table_widths.is_empty() {
+        };
+        let Some(row) = self
+            .table_rows
+            .get(header)
+            .and_then(Option::as_ref)
+            .filter(|r| r.is_header)
+        else {
             return;
-        }
-        let prefix: usize = self
-            .content
-            .chars()
-            .zip(target.chars())
-            .take_while(|(a, b)| a == b)
-            .map(|(c, _)| c.len_utf8())
-            .sum();
-        let suffix: usize = self.content[prefix..]
-            .chars()
-            .rev()
-            .zip(target[prefix..].chars().rev())
-            .take_while(|(a, b)| a == b)
-            .map(|(c, _)| c.len_utf8())
-            .sum();
-        self.adjust_table_widths(
-            &(prefix..self.content.len() - suffix),
-            &target[prefix..target.len() - suffix],
-        );
-    }
-
-    pub(super) fn set_table_width(&mut self, header: usize, col: usize, width: f32) {
-        let widths = self.table_widths.entry(header).or_default();
-        if widths.len() <= col {
-            widths.resize(col + 1, None);
-        }
-        widths[col] = Some(width.max(24.));
-        self.shape_caches.region_cols.get_mut().take();
-        self.shape_memo.get_mut().take();
+        };
+        let mut widths: Vec<f32> = row.col_widths.iter().copied().map(f32::from).collect();
+        let Some(target) = widths.get_mut(col) else {
+            return;
+        };
+        *target = width.max(24.);
+        let marker = zorite_markdown::syntax::table_marker_text(region.style, Some(&widths));
+        self.rewrite_table_marker(region, marker, cx);
     }
 
     /// The caret's table position as `(row, cell_index, grapheme_index)`, or

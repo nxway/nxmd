@@ -938,11 +938,9 @@ pub struct EditorState {
     /// that image paints at the live width and other mouse handling is suppressed.
     image_resize: Option<ImageResize>,
     /// An in-progress table column-border drag (drag-to-resize, issue #16):
-    /// the column resizes live; release commits the width to the
-    /// current editor view. `None` = no drag.
+    /// the column resizes live; release writes the explicit widths into the
+    /// Markdown marker. `None` = no drag.
     table_col_resize: Option<TableColResize>,
-    /// View-local overrides of authored widths, keyed by the table header row.
-    table_widths: std::collections::HashMap<usize, Vec<Option<f32>>>,
     /// Last-paint column-resize grip bands: `(band, header row, column, width)`.
     table_col_resize_rects: Vec<(Bounds<Pixels>, usize, usize, f32)>,
     /// The band index the pointer is on (repaint-on-change for its accent line).
@@ -1143,7 +1141,6 @@ impl EditorState {
             alert_fold_rects: Vec::new(),
             image_resize: None,
             table_col_resize: None,
-            table_widths: Default::default(),
             table_col_resize_rects: Vec::new(),
             table_resize_hover: None,
             shape_memo: std::cell::RefCell::new(None),
@@ -1180,7 +1177,6 @@ impl EditorState {
 
     /// Builder: start with the given text (caret at the start).
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
-        self.table_widths.clear();
         self.table_scroll_x.clear();
         self.invalidate_content();
         self.content = normalize_loaded(text.into());
@@ -1271,7 +1267,6 @@ impl EditorState {
     /// Replace the whole document; resets the caret to the start.
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.composition = None;
-        self.table_widths.clear();
         self.table_scroll_x.clear();
         self.invalidate_content();
         self.content = normalize_loaded(text.into());
@@ -3056,7 +3051,6 @@ impl EditorState {
     }
 
     fn restore(&mut self, s: Snapshot) {
-        self.restore_table_widths(&s.content);
         self.invalidate_content();
         self.content = s.content;
         self.selected_range = self.editable_range(s.selection);
@@ -3073,7 +3067,6 @@ impl EditorState {
     /// inserts (or a run of deletes) into one undo step so typing isn't undone
     /// one character at a time.
     fn record_edit(&mut self, range: &Range<usize>, new_text: &str) {
-        self.adjust_table_widths(range, new_text);
         self.invalidate_content();
         let kind = if new_text.is_empty() {
             EditKind::Delete
@@ -3558,7 +3551,7 @@ impl EditorState {
             return;
         }
         // A press on a column border's resize band starts a drag — the column
-        // resizes live; release keeps the width in this view. A DOUBLE-click
+        // resizes live; release persists its explicit width. A DOUBLE-click
         // auto-fits the column to its content instead (the Excel/Sheets
         // convention for a column border).
         if let Some(&(_, header_row, col, width)) = self
@@ -3678,10 +3671,10 @@ impl EditorState {
             cx.notify();
             return;
         }
-        // Resizing is view state, independent of text history and autosave.
+        // Only a deliberate drag authors the table width marker.
         if let Some(resize) = self.table_col_resize.take() {
             if resize.width != resize.orig {
-                self.set_table_width(resize.header_row, resize.col, resize.width);
+                self.persist_table_width(resize.header_row, resize.col, resize.width, cx);
             }
             cx.notify();
             return;
@@ -4584,6 +4577,9 @@ impl EditorState {
     }
 
     fn invalidate_content(&mut self) {
+        // Hitboxes and a live grip refer to rows in the previous source generation.
+        self.table_col_resize = None;
+        self.table_col_resize_rects.clear();
         self.content_gen += 1;
         self.index.take();
         self.shape_memo.get_mut().take();
@@ -5375,7 +5371,6 @@ impl EntityInputHandler for EditorState {
             if new_text.is_empty() {
                 self.cancel_composition();
             } else {
-                self.adjust_table_widths(&range, new_text);
                 let source = self.committed_range(range);
                 let c = self.composition.take().unwrap();
                 self.content.clear();
@@ -5439,11 +5434,6 @@ impl EntityInputHandler for EditorState {
                 cx.notify();
             }
             return;
-        }
-        if !self.table_widths.is_empty()
-            && (self.content[range.clone()].contains('\n') || new_text.contains('\n'))
-        {
-            self.table_widths.clear();
         }
         let source = self.committed_range(range.clone());
         if let Some(c) = &mut self.composition {
