@@ -21,7 +21,12 @@ text shaping, input, clipboard integration and GPU rendering.
   runs and byte maps shared by measurement, paint, hit testing and caret placement.
   Column sizing measures actual styled text and longest words, shares available
   width, and retains horizontal scrolling when minimum content widths cannot fit.
-  Row height uses the same wrapping as paint. Caret and hit geometry account for
+  As the viewport narrows, flexible cell padding contracts and short values receive
+  room to stay on one line when possible. Automatic layout leaves Markdown intact.
+  Dragging a column divider or double-clicking it to fit explicitly saves the
+  table's widths in the existing `<!-- table:… cols=… -->` marker. That edit can
+  be undone, and the saved widths apply on reopen. Explicit widths can require
+  scrolling in a smaller window. Row height uses the same wrapping as paint. Caret and hit geometry account for
   alignment on each wrapped line. Vertical navigation visits wrapped cell lines
   and clamps cross-cell positions to UTF-8 boundaries.
 - Table projection/height caches are bounded. Cache keys include relevant source,
@@ -67,8 +72,7 @@ input mutations are never retried to disguise dropped events.
 of two synthetic workloads: a short note and a document with 120 formatted
 sections, nested lists and tables, inside a 250-note vault. It records process
 working set, private bytes, window-handle appearance, five-second idle CPU and
-five native input-to-copy acknowledgement round trips. The previous public alpha
-(run 43239301300) is the baseline. Raw samples are in `performance.json` in the
+five native input-to-copy acknowledgement round trips. The workflow requests the audited pre-remediation build for comparison when available. Raw samples are in `performance.json` in the
 validation artifact. These are shared-runner measurements, not cold-cache startup
 or isolated keystroke-to-photon latency; compare distributions and workloads,
 not a single sample.
@@ -77,6 +81,4 @@ Full document virtualization is not implemented. Scanning and some table layout
 work can still scale with document size. The scanner supports a focused Markdown
 subset, not every CommonMark/Obsidian extension; tables require leading pipes.
 Unsupported syntax is preserved in source. Complex bidirectional wrapped text,
-physical dead-key layouts and Windows IME composition still need manual testing;
-clipboard Unicode coverage does not certify those input methods. No new public
-release is published by this sprint.
+physical dead-key layouts and IMEs beyond the tested Microsoft Japanese profile need further testing.

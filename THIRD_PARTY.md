@@ -29,3 +29,20 @@ SOFTWARE.
 Native filesystem notifications use notify 8.2.2 (CC0-1.0):
 https://github.com/notify-rs/notify
 https://creativecommons.org/publicdomain/zero/1.0/legalcode
+
+GPUI and the gpui-pre 0.3.12 Windows backend use Apache-2.0. The Windows
+distribution includes the complete license in LICENSE-APACHE-2.0.txt and the
+GPUI crates’ own license files in DEPENDENCY-NOTICES.txt.
+https://github.com/zed-industries/zed/tree/main/crates/gpui
+
+DEPENDENCY-NOTICES.txt indexes the locked Windows dependencies and their
+redistribution texts. RUST-STANDARD-LIBRARY.html is supplied by the compiler
+used to build the executable. The packaging step collects both.
+
+Supplementary texts for crates whose archives omit their license files come
+from the Taffy 0.15.1 source revision, the original SeaHash project, and the
+Boost Software License 1.0 used by clipboard-win and error-code.
+
+- https://github.com/DioxusLabs/taffy/blob/0064bd54cbe38bf1d8bcd6ec6ab0704d45fb048a/LICENSE
+- https://github.com/redox-os/tfs/blob/master/LICENSE
+- https://www.boost.org/LICENSE_1_0.txt

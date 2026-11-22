@@ -21,6 +21,8 @@ if ((($imports + $tree) -join "`n") -match $forbidden) { throw "Unexpected brows
 Copy-Item $exe artifacts/nxmd.exe
 Copy-Item LICENSE artifacts/LICENSE.txt
 Copy-Item THIRD_PARTY.md artifacts/THIRD_PARTY.md
+python ./scripts/windows-notices.py artifacts
+if ($LASTEXITCODE -ne 0) { throw 'Windows redistribution notices could not be assembled' }
 Copy-Item docs/windows-release.md artifacts/README-WINDOWS.md
 Get-FileHash artifacts/nxmd.exe -Algorithm SHA256 | Format-List | Out-String | Set-Content artifacts/SHA256.txt
 $report = @(

@@ -1,6 +1,6 @@
 # Windows release validation
 
-Download the `nxmd-windows-x64-<commit>` artifact from a completed **Windows release** GitHub Actions run, extract the ZIP, and run `nxmd.exe`. Use a copy of your vault for initial testing. This is an unsigned pre-release application; Windows may show a SmartScreen warning.
+Download the Windows x64 ZIP and its .sha256 file from the [GitHub pre-release](https://github.com/nxway/nxmd/releases/tag/v0.3.0-alpha). Compare `Get-FileHash -Algorithm SHA256 <zip-path>` with the checksum, extract the ZIP, and run `nxmd.exe`. Use a copy of your vault for initial testing. This is an unsigned pre-release application; Windows may show a SmartScreen warning.
 
 The artifact is uploaded after tests, release compilation and dependency inspection, before the GUI smoke test. Check the smoke-test step and the separate `nxmd-windows-validation-<commit>` artifact before treating the run as validated. A downloadable executable does not imply the entire workflow passed.
 
@@ -23,9 +23,9 @@ cargo test --locked --release --bin nxmd
 ./scripts/windows-smoke.ps1 -Executable ./target/release/nxmd.exe
 ```
 
-The smoke test uses a temporary vault and isolated LOCALAPPDATA. It checks native window creation, responsiveness, typing and selection undo/redo, targeted context actions, mouse/middle tab closing, external-conflict close protection, unchanged note bytes and graceful exit. It also exercises native bitmap clipboard import, automatic image discovery, image tabs and restart, corrupt-image errors, standard/Obsidian image painting, source preservation and a large image directory. It does not certify IME, Windows shell drag-and-drop or exhaustive editing correctness. No personal vault is used.
+The smoke test uses a temporary vault and isolated LOCALAPPDATA. It checks native window creation, responsiveness, typing and selection undo/redo, targeted context actions, mouse/middle tab closing, external-conflict close protection, unchanged note bytes and graceful exit. It also exercises native bitmap clipboard import, automatic image discovery, image tabs and restart, corrupt-image errors, standard/Obsidian image painting, source preservation and a large image directory. Additional workflow steps exercise responsive tables, saved column widths, multiline selection and native Japanese IME composition. Windows shell drag-and-drop and other input profiles still require testing. No personal vault is used.
 
-`artifacts/` contains the executable, its SHA-256 digest, commit, compiler/runner details, native import report and Windows Rust dependency tree. Workflow logs contain compilation and test output. Source licenses are retained; the package includes nxmd and direct editor attribution. Full transitive redistribution notices should be audited before public distribution.
+`artifacts/` contains the executable, its SHA-256 digest, commit, compiler/runner details, native import report and Windows Rust dependency tree. Workflow logs contain compilation and test output. The distribution includes the nxmd MIT license, GPUI Apache-2.0 text, dependency notices and the Rust standard library notices for the build toolchain.
 
 ## Dialog crash fix and diagnostics
 
@@ -40,7 +40,7 @@ include a forced backtrace. A best-effort native unhandled-exception handler
 records the exception code to a pre-opened file without allocating, then leaves
 normal Windows crash handling in place. Forced termination, stack exhaustion or
 severe corruption cannot be guaranteed to produce a log. These files are local;
-they are not uploaded by the application. They are not automatically rotated.
+they are not uploaded by the application. At startup nxmd prunes recognized inactive logs to a target of 10 files, 14 days and 10 MiB. Routine output is bounded per process. [Diagnostic retention](stabilization.md#local-windows-diagnostics)
 
 The Windows smoke test exercises all six dialog entry points, accepts a vault
 and a new note through the real native dialogs, checks cancellation and owner

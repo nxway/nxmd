@@ -26,9 +26,9 @@ No HTTP client is initialized and no remote image loader is installed by nxmd. F
 
 ## Safety limits
 
-Writes use same-directory temporary files, flush data and compare original bytes twice before atomic replacement. This detects external edits but is not a filesystem transaction with noncooperating writers: there remains a race between the last comparison and replacement. Symlink containment likewise is not hardened against adversarial concurrent directory replacement. Do not describe either as race-free. Renames use hard-link/unlink and refuse existing destinations; unsupported filesystems produce errors. Deletions retain notes under `.nxmd-trash`.
+Windows saves flush the editor bytes and use `ReplaceFileW` with a displaced-file backup. nxmd verifies both versions before acknowledging the save. An ambiguous result retains the transaction files for inspection. A same-volume note move renames the validated source handle with replacement disabled. A sharing violation or destination collision leaves the tab at its original path. Recoverable deletion uses `.nxmd-trash`. Containment checks still depend on directory ancestors remaining stable during an operation.
 
-Closing the window attempts dirty saves and refuses closure on failure. Process termination/crashes can still lose edits within the debounce interval; durable draft recovery is not implemented. External changes are detected by polling open notes; explorer changes use native per-directory notifications and background snapshots. Session errors appear in the status bar.
+Dirty tabs checkpoint committed edits in the local profile. A relaunch can restore a durable draft or save it separately. Edits made since the last completed checkpoint are vulnerable to abrupt termination. A failed save blocks normal close. Open notes are polled for external changes and the explorer refreshes using filesystem notifications. [Saving and recovery on Windows](reliability.md)
 
 ## Workspace presentation
 

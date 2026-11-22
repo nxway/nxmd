@@ -8,6 +8,10 @@ An external change pauses autosave for that tab. Inspect the disk text, save the
 
 Windows saves compare the actual disk bytes to the loaded baseline and skip replacement when all three versions match. A changed save flushes a temporary file and calls ReplaceFileW with a displaced-file backup. It checks both the displaced contents and the installed contents before acknowledging success. A detected race or ambiguous OS result leaves a transaction directory beside the note. Its target.json identifies the intended destination, editor is the staged version if still present, and displaced is the original if Windows moved it. The error identifies the directory. Preserve these files, the note, and the profile draft before resolving the conflict. The app blocks further saves through that target while the transaction is present. Independent programs can change a file again after a completed verification.
 
+During IME composition the editor displays provisional input and retains the original selection. Autosave and crash recovery use committed text. A commit becomes one undo step. Cancellation restores the previous selection and contents.
+
+On Windows, moving a note checks its file identity and bytes against the file selected before the destination dialog. The move holds a handle that excludes writes and deletion and renames through that handle on the same volume. An existing destination, externally replaced source or incompatible open handle causes the move to fail. The tab adopts the new path only after success.
+
 ## Regression fixtures
 
 | Reproduction | Cause | Fix and coverage |

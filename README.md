@@ -4,6 +4,8 @@ Native Rust Markdown editor using GPUI and zorite-editor. Local Markdown files a
 
 ## Windows build
 
+[Download the v0.3.0-alpha Windows x64 pre-release](https://github.com/nxway/nxmd/releases/tag/v0.3.0-alpha). The unsigned ZIP includes the executable, commit and redistribution notices. The release has a companion SHA-256 checksum.
+
 Install Rust stable with the `x86_64-pc-windows-msvc` toolchain, Visual Studio 2022 C++ Build Tools and Windows SDK. From this directory:
 
 ```powershell
