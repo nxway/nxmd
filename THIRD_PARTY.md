@@ -36,7 +36,9 @@ GPUI crates’ own license files in DEPENDENCY-NOTICES.txt.
 https://github.com/zed-industries/zed/tree/main/crates/gpui
 
 DEPENDENCY-NOTICES.txt indexes the locked Windows dependencies and their
-redistribution texts. RUST-STANDARD-LIBRARY.html is supplied by the compiler
+redistribution texts. EMBEDDED-NOTICES.txt contains additional source-file
+attributions and notices for embedded components. This software is based in
+part on the work of the Independent JPEG Group. RUST-STANDARD-LIBRARY.html is supplied by the compiler
 used to build the executable. The packaging step collects both.
 
 Supplementary texts for crates whose archives omit their license files come
