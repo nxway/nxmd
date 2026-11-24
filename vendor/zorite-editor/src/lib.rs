@@ -291,6 +291,13 @@ struct Composition {
     replaced: Range<usize>,
 }
 
+/// Native input coalesces adjacent keystrokes. Commands are isolated undo steps.
+#[derive(Clone, Copy, PartialEq)]
+enum CommitPolicy {
+    NativeInput,
+    Command,
+}
+
 /// The last edit's kind, for coalescing a run of edits into one undo step.
 /// `Insert(end)` is a single-grapheme insert whose caret ends at `end`.
 #[derive(Clone, Copy, PartialEq)]
@@ -1241,26 +1248,79 @@ impl EditorState {
         }
     }
 
-    /// Replace byte `range` with `text` as ONE recorded (undoable) edit, leaving the caret
-    /// after the inserted text. Unlike [`Self::set_text`] this preserves — and extends — the
-    /// undo history, so a host writing back a structural edit (e.g. a committed `$$…$$`
-    /// formula) lands as a normal undo step rather than clobbering the history.
+    /// Replace a displayed source range as an independent undo step. Changed bytes
+    /// emit exactly one `Changed` for persistence. An identical replacement only
+    /// places the caret. Use `set_text` to load/reset without a durable edit.
     pub fn replace_range(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
-        // Snap to char boundaries (start down, end up) so a stale/shifted range — e.g. one
-        // captured before a prior formula commit moved the bytes — can't panic mid-UTF-8.
+        self.commit_replacement(range, text, CommitPolicy::Command, |_, end| end, cx);
+    }
+
+    /// Complete one source replacement, including its history, final caret and
+    /// host notification. Resolve the caret against the *new* source/index.
+    fn commit_replacement(
+        &mut self,
+        range: Range<usize>,
+        text: &str,
+        policy: CommitPolicy,
+        caret_after: impl FnOnce(&Self, usize) -> usize,
+        cx: &mut Context<Self>,
+    ) {
+        let range = self.committed_range(self.editable_range(range));
+        let composition = self.composition.take();
+        let had_preedit = composition.is_some();
+        if let Some(c) = &composition {
+            self.content.clone_from(&c.before.content);
+            self.selected_range = c.before.selection.clone();
+            self.selection_reversed = c.before.reversed;
+            self.diagnostics.clear();
+            self.marked_range = None;
+        }
         let range = self.editable_range(range);
-        let range = self.committed_range(range);
-        self.cancel_composition();
-        self.record_edit(&range, text);
-        self.content.replace_range(range.clone(), text);
-        self.remap_diagnostics(&range, text.len());
-        let caret = self.caret_boundary(range.start + text.len());
-        self.selected_range = caret..caret;
+        let changed = self.content[range.clone()] != *text;
+        let typing = policy == CommitPolicy::NativeInput && !had_preedit;
+
+        if changed {
+            self.last_replaced =
+                (typing && !range.is_empty()).then(|| self.content[range.clone()].to_owned());
+            if typing {
+                self.record_input_history(&range, text);
+            } else {
+                // A native IME commit restores the original directional selection on
+                // undo. An independent command uses the ordinary collapsed snapshot.
+                let before = composition
+                    .filter(|_| policy == CommitPolicy::NativeInput)
+                    .map_or_else(|| self.snapshot(), |c| c.before);
+                self.push_undo(before);
+            }
+            self.content.replace_range(range.clone(), text);
+            self.remap_diagnostics(&range, text.len());
+        }
+        if changed || had_preedit {
+            // Resolving preedit to the original bytes changes only the display
+            // revision. The durable event below is conditional on source bytes.
+            self.invalidate_content();
+            if !typing {
+                self.last_edit = EditKind::Other;
+                self.last_edit_keystroke = false;
+            }
+        }
+
+        let caret = self.caret_boundary(caret_after(self, range.start + text.len()));
+        let selection = caret..caret;
+        let moved = self.selected_range != selection || self.selection_reversed;
+        self.selected_range = selection;
         self.selection_reversed = false;
         self.marked_range = None;
-        // Don't coalesce a following keystroke into this structural replacement.
-        self.last_edit = EditKind::Other;
-        cx.notify();
+        self.goal_x = None;
+        if changed {
+            if typing && word_boundary_input(text) {
+                self.apply_auto_replace(range.start);
+            }
+            cx.emit(EditorEvent::Changed);
+        }
+        if changed || moved || had_preedit {
+            cx.notify();
+        }
     }
 
     /// Replace the whole document; resets the caret to the start.
@@ -2350,7 +2410,6 @@ impl EditorState {
                     .flatten()
             }) {
                 self.replace_range(range, "", cx);
-                cx.emit(EditorEvent::Changed);
                 return;
             }
             // The same Word-style treatment for math: backspacing onto an
@@ -2364,7 +2423,6 @@ impl EditorState {
                 .filter(|(r, _)| off == r.end)
             {
                 self.replace_range(range, "", cx);
-                cx.emit(EditorEvent::Changed);
                 return;
             }
             if col == 0
@@ -2374,7 +2432,6 @@ impl EditorState {
             {
                 let range = self.math_delete_range(range);
                 self.replace_range(range, "", cx);
-                cx.emit(EditorEvent::Changed);
                 return;
             }
             // Backspacing from the line below a property panel joins as
@@ -2390,7 +2447,6 @@ impl EditorState {
             // emptied construct's marker pair with it.
             if let Some(range) = self.fmt_delete_range(off, true) {
                 self.replace_range(range, "", cx);
-                cx.emit(EditorEvent::Changed);
                 return;
             }
             let prev = self.previous_boundary(off);
@@ -2419,7 +2475,6 @@ impl EditorState {
                     .flatten()
             }) {
                 self.replace_range(range, "", cx);
-                cx.emit(EditorEvent::Changed);
                 return;
             }
             // Math mirrors of the backspace guards: deleting onto an inline
@@ -2430,7 +2485,6 @@ impl EditorState {
                 .filter(|(r, _)| off == r.start)
             {
                 self.replace_range(range, "", cx);
-                cx.emit(EditorEvent::Changed);
                 return;
             }
             if off == self.line_end(row)
@@ -2439,7 +2493,6 @@ impl EditorState {
             {
                 let range = self.math_delete_range(range);
                 self.replace_range(range, "", cx);
-                cx.emit(EditorEvent::Changed);
                 return;
             }
             // Mirroring backspace's property join: pulling the panel's first
@@ -2450,7 +2503,6 @@ impl EditorState {
             // Cditor-style around hidden formatting markers (see backspace).
             if let Some(range) = self.fmt_delete_range(off, false) {
                 self.replace_range(range, "", cx);
-                cx.emit(EditorEvent::Changed);
                 return;
             }
             let next = self.next_boundary(off);
@@ -3061,11 +3113,16 @@ impl EditorState {
         self.diagnostics.clear();
     }
 
+    // Legacy multi-step commands manage their own source mutation and completion.
+    fn record_edit(&mut self, range: &Range<usize>, new_text: &str) {
+        self.invalidate_content();
+        self.record_input_history(range, new_text);
+    }
+
     /// Snapshot the pre-edit state for undo, coalescing a run of single-grapheme
     /// inserts (or a run of deletes) into one undo step so typing isn't undone
     /// one character at a time.
-    fn record_edit(&mut self, range: &Range<usize>, new_text: &str) {
-        self.invalidate_content();
+    fn record_input_history(&mut self, range: &Range<usize>, new_text: &str) {
         let kind = if new_text.is_empty() {
             EditKind::Delete
         } else if range.start == range.end
@@ -3885,7 +3942,6 @@ impl EditorState {
         };
         let end = self.after_line(row);
         self.replace_range(start..end, "", cx);
-        cx.emit(EditorEvent::Changed);
     }
 
     /// Delete the image occupying logical line `row` — line + trailing newline,
@@ -3894,7 +3950,6 @@ impl EditorState {
     fn delete_image_row(&mut self, row: usize, cx: &mut Context<Self>) {
         if let Some(range) = self.image_row_range(row) {
             self.replace_range(range, "", cx);
-            cx.emit(EditorEvent::Changed);
         }
     }
 
@@ -4451,9 +4506,13 @@ impl EditorState {
             if t < n {
                 new.push_str(separator);
             }
-            self.replace_range(block_start..target_off, &new, cx);
-            let caret = block_start + rest_len;
-            self.selected_range = caret..caret;
+            self.commit_replacement(
+                block_start..target_off,
+                &new,
+                CommitPolicy::Command,
+                |_, _| block_start + rest_len,
+                cx,
+            );
         } else {
             // Up: [between... block] → [block \n between...]
             let target_off = starts[t];
@@ -4461,10 +4520,14 @@ impl EditorState {
             let mut new = block_text.clone();
             new.push_str(self.insertion_eol(bs - 1));
             new.push_str(between);
-            self.replace_range(target_off..block_end, &new, cx);
-            self.selected_range = target_off..target_off;
+            self.commit_replacement(
+                target_off..block_end,
+                &new,
+                CommitPolicy::Command,
+                |_, _| target_off,
+                cx,
+            );
         }
-        cx.emit(EditorEvent::Changed);
     }
 
     // --- Selection helpers ---------------------------------------------------
@@ -4502,7 +4565,6 @@ impl EditorState {
                 None => {
                     let end = self.content.len();
                     self.replace_range(end..end, "\n", cx);
-                    cx.emit(EditorEvent::Changed);
                     self.content.len()
                 }
             }
@@ -4981,13 +5043,14 @@ impl EditorState {
         }
         let indent = &line[..line.len() - trimmed.len()];
         let new_line = format!("{indent}```{}", if lang == "text" { "" } else { lang });
-        self.replace_range(start..end, &new_line, cx);
-        // replace_range parks the caret at the fence line's end, which reveals
-        // the raw ``` marker (reveal-on-caret). Step onto the body's first
-        // line instead so the fence stays hidden.
-        let caret = self.after_line(fence_row);
-        self.selected_range = caret..caret;
-        cx.emit(EditorEvent::Changed);
+        // Seat the caret on the body so the opening fence stays hidden.
+        self.commit_replacement(
+            start..end,
+            &new_line,
+            CommitPolicy::Command,
+            |editor, _| editor.after_line(fence_row),
+            cx,
+        );
     }
 
     fn checkbox_at(&self, position: Point<Pixels>) -> Option<usize> {
@@ -5360,53 +5423,12 @@ impl EntityInputHandler for EditorState {
             .map(|r| self.range_from_utf16(r))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        let range = self.editable_range(range);
-        if self.composition.is_some() {
-            if new_text.is_empty() {
-                self.cancel_composition();
-            } else {
-                let source = self.committed_range(range);
-                let c = self.composition.take().unwrap();
-                self.content.clear();
-                self.content.push_str(&c.before.content[..source.start]);
-                self.content.push_str(new_text);
-                self.content.push_str(&c.before.content[source.end..]);
-                self.push_undo(c.before);
-                self.invalidate_content();
-                let caret = self.caret_boundary(source.start + new_text.len());
-                self.selected_range = caret..caret;
-                self.selection_reversed = false;
-                self.marked_range = None;
-                self.goal_x = None;
-                self.diagnostics.clear();
-                self.last_replaced = None;
-                self.last_edit_keystroke = false;
-                self.last_edit = EditKind::Other;
-                cx.emit(EditorEvent::Changed);
-            }
+        if self.composition.is_some() && new_text.is_empty() {
+            self.cancel_composition();
             cx.notify();
             return;
         }
-        // Report what this edit replaced (see `last_replaced`) — the fact a
-        // diff can't reconstruct when the selection starts with the typed char.
-        self.last_replaced =
-            (range.start < range.end).then(|| self.content[range.clone()].to_string());
-        self.record_edit(&range, new_text);
-        self.content =
-            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
-        let caret = self.caret_boundary(range.start + new_text.len());
-        self.selected_range = caret..caret;
-        self.selection_reversed = false;
-        self.marked_range = None;
-        self.goal_x = None;
-        // Keep unaffected diagnostics valid across the edit (shift those after
-        // it, drop those it overlapped); the host recomputes the edited region.
-        self.remap_diagnostics(&range, new_text.len());
-        if word_boundary_input(new_text) {
-            self.apply_auto_replace(range.start);
-        }
-        cx.emit(EditorEvent::Changed);
-        cx.notify();
+        self.commit_replacement(range, new_text, CommitPolicy::NativeInput, |_, end| end, cx);
     }
 
     fn replace_and_mark_text_in_range(

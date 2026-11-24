@@ -486,3 +486,136 @@ fn multiline_paste_preserves_source_endings(cx: &mut gpui::TestAppContext) {
         }
     });
 }
+
+fn count_durable_events(
+    editor: gpui::WindowHandle<EditorState>,
+    cx: &mut gpui::TestAppContext,
+) -> (std::rc::Rc<std::cell::Cell<usize>>, gpui::Subscription) {
+    let changes = std::rc::Rc::new(std::cell::Cell::new(0));
+    let observed = changes.clone();
+    let subscription = editor
+        .update(cx, |_, _, cx| {
+            cx.subscribe(&cx.entity(), move |_, _, event: &EditorEvent, _| {
+                if matches!(event, EditorEvent::Changed) {
+                    observed.set(observed.get() + 1);
+                }
+            })
+        })
+        .unwrap();
+    (changes, subscription)
+}
+
+#[gpui::test]
+fn committed_replacements_notify_once_and_skip_noops(cx: &mut gpui::TestAppContext) {
+    let original = "Ж\r\n文\n";
+    let editor = cx.add_window(|w, cx| EditorState::new(w, cx).with_text(original));
+    let (changes, _subscription) = count_durable_events(editor, cx);
+    editor
+        .update(cx, |e, _, cx| {
+            let generation = e.content_gen;
+            e.set_diagnostics(
+                vec![Diagnostic { range: 0..2 }, Diagnostic { range: 4..7 }],
+                cx,
+            );
+            assert_eq!(e.line_starts(), &[0, 4, 8]);
+            e.replace_range(1..2, "語", cx);
+            assert_eq!(e.line_starts(), &[0, 5, 9]);
+            assert_eq!(e.diagnostics.len(), 1);
+            assert_eq!(e.diagnostics[0].range, 5..8);
+            assert_eq!(e.committed_text().as_bytes(), "語\r\n文\n".as_bytes());
+            assert_eq!(e.selected_range, 3..3);
+            assert_eq!(e.content_gen, generation + 1);
+            assert_eq!(e.undo_stack.len(), 1);
+        })
+        .unwrap();
+    assert_eq!(
+        changes.get(),
+        1,
+        "public replacement must reach the host subscription"
+    );
+    editor
+        .update(cx, |e, w, cx| {
+            let generation = e.content_gen;
+            e.replace_range(0..3, "語", cx);
+            e.replace_text_in_range(None, "", w, cx);
+            assert_eq!(e.content_gen, generation);
+            assert_eq!(e.undo_stack.len(), 1);
+        })
+        .unwrap();
+    assert_eq!(changes.get(), 1);
+    editor
+        .update(cx, |e, w, cx| {
+            e.undo(&Undo, w, cx);
+            assert_eq!(e.text().as_bytes(), original.as_bytes());
+            assert_eq!(e.selected_range, 0..0);
+            e.redo(&Redo, w, cx);
+            assert_eq!(e.selected_range, 3..3);
+            assert_eq!(e.text().as_bytes(), "語\r\n文\n".as_bytes());
+            let generation = e.content_gen;
+            e.replace_text_in_range(None, "a", w, cx);
+            e.replace_text_in_range(None, "b", w, cx);
+            assert_eq!(e.undo_stack.len(), 2);
+            assert_eq!(e.content_gen, generation + 2);
+            assert_eq!(e.selected_range, 5..5);
+            assert_eq!(e.text(), "語ab\r\n文\n");
+            e.undo(&Undo, w, cx);
+            assert_eq!(e.text(), "語\r\n文\n");
+        })
+        .unwrap();
+    assert_eq!(changes.get(), 6);
+}
+
+#[gpui::test]
+fn row_deletion_is_one_independent_commit(cx: &mut gpui::TestAppContext) {
+    let source = "| A | B |\r\n| --- | --- |\n| abc | x |\r\n| 👩‍💻字 | y |";
+    let editor = cx.add_window(|w, cx| EditorState::new(w, cx).with_text(source));
+    let (changes, _subscription) = count_durable_events(editor, cx);
+    editor
+        .update(cx, |e, w, cx| {
+            e.set_cursor(source.find("abc").unwrap() + 1, cx);
+            e.replace_text_in_range(None, "Ж", w, cx);
+            let before = e.text().to_owned();
+            let old_caret = e.cursor_offset();
+            let generation = e.content_gen;
+            let _ = e.line_starts();
+            TableMenuAction::DeleteRow.apply(e, cx);
+            let expected = source.replace("| abc | x |\r\n", "");
+            assert_eq!(e.text().as_bytes(), expected.as_bytes());
+            let caret = expected.find("字").unwrap() + "字".len();
+            assert_eq!(e.selected_range, caret..caret);
+            assert_eq!(e.content_gen, generation + 1);
+            assert_eq!(e.undo_stack.len(), 2);
+            e.undo(&Undo, w, cx);
+            assert_eq!(e.text(), before);
+            assert_eq!(e.selected_range, old_caret..old_caret);
+            e.redo(&Redo, w, cx);
+            assert_eq!(e.text(), expected);
+            assert_eq!(e.selected_range, caret..caret);
+        })
+        .unwrap();
+    assert_eq!(changes.get(), 4);
+}
+
+#[gpui::test]
+fn committing_original_ime_bytes_only_ends_preedit(cx: &mut gpui::TestAppContext) {
+    let editor = cx.add_window(|w, cx| EditorState::new(w, cx).with_text("a語b"));
+    let (changes, _subscription) = count_durable_events(editor, cx);
+    editor
+        .update(cx, |e, w, cx| {
+            e.selected_range = 1..4;
+            e.replace_and_mark_text_in_range(None, "かな", None, w, cx);
+            assert_eq!(e.committed_text(), "a語b");
+            let display_generation = e.content_gen;
+            e.replace_text_in_range(None, "語", w, cx);
+            assert_eq!(e.text(), e.committed_text());
+            assert_eq!(e.text(), "a語b");
+            assert_eq!(e.selected_range, 4..4);
+            assert!(e.marked_range.is_none());
+            assert!(e.undo_stack.is_empty());
+            assert_eq!(e.content_gen, display_generation + 1);
+            e.set_text("reset", cx);
+            assert!(e.undo_stack.is_empty());
+        })
+        .unwrap();
+    assert_eq!(changes.get(), 0);
+}

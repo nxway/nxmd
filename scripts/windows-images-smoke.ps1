@@ -56,6 +56,12 @@ $importWatch=[Diagnostics.Stopwatch]::StartNew()
 [System.Windows.Forms.SendKeys]::SendWait('^v')
 $imported=Join-Path $imagesVault 'attachments/image-1.png'
 Wait-ImageCondition { (Test-Path $imported) -and ([string](Read-SmokeSnapshot $imageNote)).Contains('![](attachments/image-1.png)') } 'Native clipboard image did not import and autosave'
+# Public EditorState::replace_range is the only edit in this import. Verify
+# the host saves it without Ctrl+S, preserving the BOM and mixed terminators.
+$insertedSource = $imageSource + "`n![](attachments/image-1.png)`n"
+$insertedWithBom = [string][char]0xfeff + $insertedSource
+$expectedHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($insertedWithBom)))
+Wait-ImageCondition { (Read-SmokeSnapshot $imageNote -Hash) -ceq $expectedHash } 'Image autosave changed surrounding bytes'
 $importHash=(Get-FileHash $imported).Hash
 # attachments must have appeared automatically as the first folder; expand and open.
 [NativeSmoke]::Click($mainWindow,100,119)
@@ -69,12 +75,10 @@ if ((Get-FileHash $imported).Hash -ne $importHash) { throw 'Saving an image tab 
 [NativeSmoke]::Click($mainWindow,370,22)
 [System.Windows.Forms.SendKeys]::SendWait('^z')
 [System.Windows.Forms.SendKeys]::SendWait('^s')
-Start-Sleep -Milliseconds 300
-if ((Get-FileHash $imageNote).Hash -ne $imageSourceHash) { throw 'Switching image tabs lost Markdown undo/source preservation' }
+Wait-ImageCondition { (Read-SmokeSnapshot $imageNote -Hash) -ceq $imageSourceHash } 'Switching image tabs lost Markdown undo/source preservation'
 [System.Windows.Forms.SendKeys]::SendWait('^+z')
 [System.Windows.Forms.SendKeys]::SendWait('^s')
-Start-Sleep -Milliseconds 300
-if (!([string](Read-SmokeSnapshot $imageNote)).Contains('![](attachments/image-1.png)')) { throw 'Image insertion redo failed' }
+Wait-ImageCondition { (Read-SmokeSnapshot $imageNote -Hash) -ceq $expectedHash } 'Image insertion redo failed'
 # Native watcher: create/rename/delete externally, with no F5 or vault reopen.
 $external=Join-Path $imagesVault '0 External.webp'
 Copy-Item (Join-Path $PSScriptRoot '../tests/fixtures/sample.webp') $external
@@ -110,6 +114,12 @@ $mainWindow=$process.MainWindowHandle
 [void][NativeSmoke]::SetForegroundWindow($mainWindow)
 Wait-ImageCondition { (Active-ImagePath) -eq 'attachments/image-1.png' -and (Color-Pixels 0 255 0) -gt 250 } 'Restored image tab did not render or persist its active selection'
 if ((Get-FileHash $imported).Hash -ne $importHash) { throw 'Image changed across restart' }
+[NativeSmoke]::Click($mainWindow,370,22)
+Wait-ImageCondition { (Active-ImagePath) -eq 'ImageNote.md' } 'Restored Markdown tab did not activate'
+[System.Windows.Forms.Clipboard]::SetText([Guid]::NewGuid().ToString())
+Assert-EditorText $insertedWithBom
+[NativeSmoke]::Click($mainWindow,550,22)
+Wait-ImageCondition { (Active-ImagePath) -eq 'attachments/image-1.png' } 'Could not return to the imported image'
 # Many files: no thumbnail decoding on enumeration, and bounded lazy viewing.
 $process.Refresh();$beforeImages=@{workingSetBytes=$process.WorkingSet64;privateBytes=$process.PrivateMemorySize64}
 $big=New-Item -ItemType Directory -Force (Join-Path $imagesVault 'Big')

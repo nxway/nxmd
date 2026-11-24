@@ -584,6 +584,10 @@ impl EditorState {
     /// The caret keeps its cell + in-cell offset, landing on the row that takes the
     /// deleted row's place. No-op outside a table.
     pub fn delete_table_row(&mut self, cx: &mut Context<Self>) {
+        // Determine the row and grapheme anchor from durable source.
+        if self.cancel_composition() {
+            cx.notify();
+        }
         let Some((row, cell, in_cell)) = self.caret_table_cell_pos() else {
             return;
         };
@@ -602,10 +606,6 @@ impl EditorState {
         } else {
             (self.line_end(row - 1), line_end)
         };
-        let range = del_start..del_end;
-        self.record_edit(&range, "");
-        self.content = self.content[..del_start].to_owned() + &self.content[del_end..];
-        self.remap_diagnostics(&range, 0);
         // Stay at the same cell/offset, on the row now at this position (shifted
         // up), or the header if no body rows remain.
         let target = if end <= sep + 2 {
@@ -613,11 +613,14 @@ impl EditorState {
         } else {
             row.min(end - 2)
         };
-        let caret = self.caret_pos_for_cell(target, cell, in_cell);
-        self.selected_range = caret..caret;
         self.table_menu = None;
-        cx.emit(EditorEvent::Changed);
-        cx.notify();
+        self.commit_replacement(
+            del_start..del_end,
+            "",
+            CommitPolicy::Command,
+            |editor, _| editor.caret_pos_for_cell(target, cell, in_cell),
+            cx,
+        );
     }
 
     /// Delete the whole table the caret is in — its grid lines plus an optional
