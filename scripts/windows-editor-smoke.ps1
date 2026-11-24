@@ -93,6 +93,47 @@ Check-EditorSource $table $tablePath 'Unicode table navigation edit undo'
 Check-EditorSource $table $tablePath 'Table navigation changed source or failed on Unicode'
 [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
 $shot=Capture-Images 'editor-table-wide.png';$shot.Dispose()
+# Hover the first body row in the established wide fixture. Locate the painted
+# green vertical +/- pill rather than clicking before its hitbox is published.
+$origin = [NativeSmoke]::ScreenPoint($mainWindow,0,0)
+$hover = [NativeSmoke]::ScreenPoint($mainWindow,380,209)
+[System.Windows.Forms.Cursor]::Position = [Drawing.Point]::new($hover[0],$hover[1])
+$deletePoint = [int[]]@(0,0)
+Wait-ImageCondition {
+    $frame = Capture-Images ''
+    try {
+        $accent = [Drawing.Color]::FromArgb(255,179,207,162).ToArgb()
+        for ($y=$hover[1]-28; $y -lt $hover[1]+30; $y+=2) {
+            for ($x=$origin[0]+278; $x -lt $hover[0]; $x+=2) {
+                # A 7 px wide vertical stroke, 25 px tall, identifies the pill.
+                if ($frame.GetPixel($x,$y).ToArgb() -eq $accent -and
+                    $frame.GetPixel($x+6,$y).ToArgb() -eq $accent -and
+                    $frame.GetPixel($x,$y+24).ToArgb() -eq $accent -and
+                    $frame.GetPixel($x+6,$y+24).ToArgb() -eq $accent) {
+                    $deletePoint[0]=$x+3-$origin[0]; $deletePoint[1]=$y+24-$origin[1]
+                    return $true
+                }
+            }
+        }
+        return $false
+    } finally { $frame.Dispose() }
+} 'First body row did not expose its delete handle'
+[NativeSmoke]::Click($mainWindow,$deletePoint[0],$deletePoint[1])
+$tableWithoutRow = (($table -split "`n" | Where-Object { !$_.StartsWith('| **Bold**') }) -join "`n")
+Wait-SavedText $tablePath $tableWithoutRow 'Delete Row autosaved the exact remaining Markdown'
+[System.Windows.Forms.SendKeys]::SendWait('^z')
+Wait-SavedText $tablePath $table 'Undo restored the deleted row'
+[System.Windows.Forms.SendKeys]::SendWait('^+z')
+Wait-SavedText $tablePath $tableWithoutRow 'Redo removed just the same row'
+[System.Windows.Forms.SendKeys]::SendWait('^w')
+Wait-ImageCondition { (Active-ImagePath) -ne '02 Table.md' } 'Edited table did not close'
+Open-EditorFixture 1 '02 Table.md'
+[System.Windows.Forms.Clipboard]::SetText([Guid]::NewGuid().ToString())
+Assert-EditorText $tableWithoutRow
+# Restore the disposable fixture for the following narrow-layout scenarios.
+[System.Windows.Forms.Clipboard]::SetText($table)
+[System.Windows.Forms.SendKeys]::SendWait('^a^v')
+Wait-SavedText $tablePath $table 'Table fixture restored after reopen check'
 # Resize the real native window; row geometry and inline runs must still edit.
 Add-Type -TypeDefinition @'
 using System;
