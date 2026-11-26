@@ -132,7 +132,8 @@ Open-EditorFixture 1 '02 Table.md'
 Assert-EditorText $tableWithoutRow
 # Restore the disposable fixture for the following narrow-layout scenarios.
 [System.Windows.Forms.Clipboard]::SetText($table)
-[System.Windows.Forms.SendKeys]::SendWait('^a^v')
+[System.Windows.Forms.SendKeys]::SendWait('^a')
+[System.Windows.Forms.SendKeys]::SendWait('^v')
 Wait-SavedText $tablePath $table 'Table fixture restored after reopen check'
 # Resize the real native window; row geometry and inline runs must still edit.
 Add-Type -TypeDefinition @'
