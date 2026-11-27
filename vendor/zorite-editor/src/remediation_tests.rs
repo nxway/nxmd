@@ -125,6 +125,53 @@ fn row_deletion_is_one_independent_commit(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn repeating_table_format_preserves_history_and_generation(cx: &mut gpui::TestAppContext) {
+    let source = "| h | j |\r\n| --- | --- |\r\n| Ж文 | q |";
+    for (action, expected) in [
+        (
+            TableMenuAction::AlignCenter,
+            source.replace("| --- | --- |", "| :-: | :-- |"),
+        ),
+        (
+            TableMenuAction::SetStyle(Some("striped")),
+            format!("<!-- table:striped -->\r\n{source}"),
+        ),
+    ] {
+        let view = cx.open_window(size(px(500.), px(300.)), |w, cx| {
+            let mut e = EditorState::new(w, cx).with_text(source);
+            e.set_markdown_style(markdown_syntax::tests::test_style(), cx);
+            e.set_cursor(source.find('文').unwrap(), cx);
+            e
+        });
+        let (events, _subscription) = count_durable_events(view, cx);
+        for changed in [true, false] {
+            cx.update_window(view.into(), |_, w, cx| w.draw(cx).clear(cx))
+                .unwrap();
+            view.update(cx, |e, _, cx| {
+                let generation = e.content_gen;
+                action.apply(e, cx);
+                assert_eq!(e.committed_text().as_bytes(), expected.as_bytes());
+                assert_eq!(e.cursor_offset(), expected.find('文').unwrap());
+                assert_eq!(e.content_gen, generation + u64::from(changed));
+                assert_eq!(e.undo_stack.len(), 1);
+            })
+            .unwrap();
+            assert_eq!(events.get(), 1);
+        }
+        view.update(cx, |e, w, cx| {
+            e.undo(&Undo, w, cx);
+            assert_eq!(e.text(), source);
+            assert_eq!(e.cursor_offset(), source.find('文').unwrap());
+            e.redo(&Redo, w, cx);
+            assert_eq!(e.text(), expected);
+            assert_eq!(e.cursor_offset(), expected.find('文').unwrap());
+        })
+        .unwrap();
+        assert_eq!(events.get(), 3);
+    }
+}
+
+#[gpui::test]
 fn committing_original_ime_bytes_only_ends_preedit(cx: &mut gpui::TestAppContext) {
     let editor = cx.add_window(|w, cx| EditorState::new(w, cx).with_text("a語b"));
     let (changes, _subscription) = count_durable_events(editor, cx);

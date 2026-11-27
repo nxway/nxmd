@@ -521,19 +521,19 @@ impl EditorState {
         let sep_start = starts[sep_row];
         let sep_end = self.line_end(sep_row);
         let old_caret = self.cursor_offset();
-        let range = sep_start..sep_end;
-        self.record_edit(&range, &new_sep);
-        self.content = self.content[..sep_start].to_owned() + &new_sep + &self.content[sep_end..];
-        let delta = new_sep.len() as isize - (sep_end - sep_start) as isize;
-        let caret = if old_caret >= sep_end {
-            (old_caret as isize + delta).max(0) as usize
-        } else {
-            old_caret
-        };
-        self.selected_range = caret..caret;
-        self.remap_diagnostics(&range, new_sep.len());
-        cx.emit(EditorEvent::Changed);
-        cx.notify();
+        self.commit_replacement(
+            sep_start..sep_end,
+            &new_sep,
+            CommitPolicy::Command,
+            |_, new_end| {
+                if old_caret >= sep_end {
+                    new_end + (old_caret - sep_end)
+                } else {
+                    old_caret
+                }
+            },
+            cx,
+        );
     }
 
     /// The caret's table block as `(header_line, separator_line, end_exclusive,
@@ -758,33 +758,27 @@ impl EditorState {
             (None, false) => 1,
             _ => 0,
         };
-        self.record_edit(&range, &new);
-        self.content.replace_range(range.clone(), &new);
-        self.remap_diagnostics(&range, new.len());
-        let caret = match cell_pos {
-            Some((row, cell, in_cell)) => {
-                let same_row = (row as isize + row_shift).max(0) as usize;
-                self.caret_pos_for_cell(same_row, cell, in_cell)
-            }
-            // Caret wasn't in this table (e.g. a border drag from elsewhere):
-            // keep it where it was, shifted by the edit's byte delta — seating
-            // it "in a cell" would land it on the marker line and reveal it.
-            None => {
-                let delta = new.len() as isize - (range.end - range.start) as isize;
-                if old_caret >= range.end {
-                    (old_caret as isize + delta).max(0) as usize
-                } else if old_caret > range.start {
-                    range.start + new.len()
-                } else {
-                    old_caret
+        let start = range.start;
+        let end = range.end;
+        if self.table_menu.take().is_some() {
+            cx.notify(); // Dismiss the menu even for an unchanged marker.
+        }
+        self.commit_replacement(
+            range,
+            &new,
+            CommitPolicy::Command,
+            |editor, new_end| match cell_pos {
+                Some((row, cell, in_cell)) => {
+                    let same_row = row.saturating_add_signed(row_shift);
+                    editor.caret_pos_for_cell(same_row, cell, in_cell)
                 }
-            }
-        };
-        let caret = caret.min(self.content.len());
-        self.selected_range = caret..caret;
-        self.table_menu = None;
-        cx.emit(EditorEvent::Changed);
-        cx.notify();
+                // Outside the table, retain the position relative to the marker edit.
+                None if old_caret >= end => new_end + (old_caret - end),
+                None if old_caret > start => new_end,
+                None => old_caret,
+            },
+            cx,
+        );
     }
 
     /// Set the caret table's visual style (`None` = Grid, the default),
