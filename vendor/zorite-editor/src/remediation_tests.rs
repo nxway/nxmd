@@ -34,6 +34,49 @@ fn count_durable_events(
 }
 
 #[gpui::test]
+fn automatic_replacement_records_only_changed_bytes(cx: &mut gpui::TestAppContext) {
+    for (replacement, rewritten) in [("東京", false), ("[[東京]]", true)] {
+        let editor = cx.add_window(|w, cx| EditorState::new(w, cx).with_text("東京"));
+        let (events, _subscription) = count_durable_events(editor, cx);
+        editor
+            .update(cx, |e, w, cx| {
+                e.set_cursor(e.text().len(), cx);
+                e.set_auto_replace(move |line| Some((0..line.len(), replacement.to_owned())));
+                let generation = e.content_gen;
+                e.replace_text_in_range(None, " ", w, cx);
+                assert_eq!(e.text(), format!("{replacement} "));
+                assert_eq!(e.cursor_offset(), e.text().len());
+                assert_eq!(e.content_gen - generation, 1 + u64::from(rewritten));
+                assert_eq!(e.undo_stack.len(), 1 + usize::from(rewritten));
+            })
+            .unwrap();
+        assert_eq!(events.get(), 1);
+        if rewritten {
+            editor
+                .update(cx, |e, w, cx| {
+                    e.undo(&Undo, w, cx);
+                    assert_eq!(e.text(), "東京 ");
+                })
+                .unwrap();
+        }
+        editor
+            .update(cx, |e, w, cx| {
+                e.undo(&Undo, w, cx);
+                assert_eq!(e.text(), "東京");
+                assert!(e.undo_stack.is_empty());
+                e.redo(&Redo, w, cx);
+                assert_eq!(e.text(), "東京 ");
+                if rewritten {
+                    e.redo(&Redo, w, cx);
+                }
+                assert_eq!(e.text(), format!("{replacement} "));
+            })
+            .unwrap();
+        assert_eq!(events.get(), 3 + 2 * usize::from(rewritten));
+    }
+}
+
+#[gpui::test]
 fn committed_replacements_notify_once_and_skip_noops(cx: &mut gpui::TestAppContext) {
     let original = "Ж\r\n文\n";
     let editor = cx.add_window(|w, cx| EditorState::new(w, cx).with_text(original));

@@ -1558,7 +1558,10 @@ impl EditorState {
             self.normalize_math_at(row);
             return;
         };
-        if r.start >= r.end || r.end > line.len() {
+        if r.start >= r.end
+            || r.end > line.len()
+            || &line.as_bytes()[r.clone()] == replacement.as_bytes()
+        {
             return;
         }
         let abs = line_start + r.start..line_start + r.end;

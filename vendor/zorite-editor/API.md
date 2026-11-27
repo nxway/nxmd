@@ -393,10 +393,10 @@ as a normal undo step instead of clobbering history.
 
 **Guarantees & edge cases**
 
-- One undo step; a following keystroke is **not** coalesced into it.
+- Replacing different bytes records one independent undo step.
 - Diagnostics are remapped (spans after the edit shift; overlapping spans
   drop).
-- Does **not** emit `Changed` — the host made the edit.
+- A changed committed replacement emits one durable [`Changed`](#changed) notification. An equal-byte replacement records no undo step and emits no durable notification.
 - Caret lands at `range.start + text.len()`; selection collapses.
 
 ### Inline color
@@ -1049,12 +1049,14 @@ Everything the editor asks the host to do. Subscribe with
 
 ### `Changed`
 
-The document text changed via a **user** edit: typing, delete, paste, IME,
-applying a spell suggestion, toggling a checkbox or alert fold, an image
-resize, or a table structural edit (including the host-driven
-[table methods](#table-editing)). **Not** emitted for programmatic
-[`set_text`](#set_text) / [`replace_range`](#replace_range) — the host made
-those, so echoing would loop a save-on-change host.
+A committed edit changed the document source. Typing, paste, committed IME
+input, structural edits and host calls to [`replace_range`](#replace_range)
+publish the change. A changed committed replacement emits exactly once.
+An equal-byte replacement emits no durable notification.
+
+IME preedit updates only the displayed composition until commit. Loading or
+resetting the document with [`set_text`](#set_text) resets undo history and
+emits no ordinary committed-edit notification.
 
 **Host obligation:** persist / re-derive whatever tracks the text (save,
 re-run spell-check, refresh pre-rendered math).
