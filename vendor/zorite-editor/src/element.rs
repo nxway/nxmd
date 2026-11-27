@@ -11,8 +11,9 @@ pub(crate) struct EditorElement {
 }
 
 pub(crate) struct PrepaintState {
+    stamp: LayoutStamp,
     wrapped: Vec<WrappedLine>,
-    /// Per-line wrap-row count (see [`EditorState::wrap_rows`]).
+    /// Per-line wrap-row count (see [`PublishedLayout::wrap_rows`]).
     wrap_rows: Vec<usize>,
     /// The hovered line's gutter drag grip (line, rect) + its cursor hitbox.
     grip: Option<(usize, Bounds<Pixels>)>,
@@ -32,7 +33,7 @@ pub(crate) struct PrepaintState {
     /// Per-line gutter decoration (blockquote / list / checkbox).
     marks: Vec<Option<LineMark>>,
     /// Per-line right-to-left geometry (#66); `None` on LTR rows. Committed to
-    /// [`EditorState::rtl_rows`] in paint, like `line_insets`.
+    /// [`PublishedLayout::rtl_rows`] in paint, like `line_insets`.
     rtl: Vec<Option<RtlRow>>,
     /// Per-line inline `$…$` formulas (image + display offset + source range), painted over
     /// their spacers in the shaped text.
@@ -254,9 +255,9 @@ impl Element for EditorElement {
                 // heights diverge wildly from the wrapped layout at a narrow
                 // window — a compensation from one of those yanks the scroll
                 // offset by thousands of px and fights the user's scrolling.
-                if let (Some(f), Some(last)) = (&editor.scroll_compensator, editor.last_bounds)
-                    && editor.content_gen == editor.last_paint_gen
-                    && !editor.line_tops.is_empty()
+                if let (Some(f), Some(last)) = (&editor.scroll_compensator, editor.layout.last_bounds)
+                    && editor.layout.stamp.is_some_and(|s| s.display_revision == editor.content_gen)
+                    && !editor.layout.line_tops.is_empty()
                     && wrap_width.is_some_and(|w| (w - last.size.width).abs() < px(1.))
                 {
                     let delta = total - last.size.height;
@@ -266,9 +267,9 @@ impl Element for EditorElement {
                     // that noise on every re-render crept the feed (#122);
                     // 1.5 device px leaves margin over it.
                     if delta.abs() >= px(1.5 / sf) {
-                        let n = new_tops.len().min(editor.line_tops.len());
+                        let n = new_tops.len().min(editor.layout.line_tops.len());
                         let j = (0..n)
-                            .find(|&k| (new_tops[k] - editor.line_tops[k]).abs() > px(0.5))
+                            .find(|&k| (new_tops[k] - editor.layout.line_tops[k]).abs() > px(0.5))
                             .unwrap_or(n);
                         // Debug tap (ZORITE_WINDOW_DEBUG=1): a height change
                         // with NO edit and NO width change means a cache
@@ -287,13 +288,13 @@ impl Element for EditorElement {
                                 editor.content_gen,
                                 delta,
                                 j,
-                                editor.line_tops.get(j),
+                                editor.layout.line_tops.get(j),
                                 new_tops.get(j),
                                 line_txt
                             );
                         }
                         let changed_y =
-                            editor.line_tops.get(j).copied().unwrap_or(last.size.height);
+                            editor.layout.line_tops.get(j).copied().unwrap_or(last.size.height);
                         if last.origin.y + changed_y < px(0.) && !editor.compensated.get() {
                             editor.compensated.set(true);
                             compensate = Some((f.clone(), delta));
@@ -302,6 +303,9 @@ impl Element for EditorElement {
                 }
                 // Hand the shaping to this frame's prepaint (see ShapeMemo).
                 *editor.shape_memo.borrow_mut() = Some(ShapeMemo {
+                    stamp: editor.layout_stamp(window),
+                    font: text_style.font(),
+                    color: text_style.color,
                     wrap_width,
                     caret_row,
                     selection,
@@ -366,6 +370,9 @@ impl Element for EditorElement {
         let measured_band = editor.shape_band.replace(Some(band));
         let memo = editor.shape_memo.borrow_mut().take().filter(|m| {
             (measured_band.is_none() || measured_band == Some(band))
+                && m.stamp == editor.layout_stamp(window)
+                && m.font == font
+                && m.color == text_color
                 && m.wrap_width == wrap_width
                 && m.caret_row == caret_row
                 && m.selection == selection
@@ -1129,7 +1136,7 @@ impl Element for EditorElement {
             |top: Pixels, p: Point<Pixels>| point(bounds.left() + p.x, bounds.top() + top + p.y);
 
         // Caret/selection positioning must use THIS frame's fresh per-row data —
-        // `editor.offset_maps`/`line_insets` aren't committed until paint, so the
+        // `editor.layout.offset_maps`/`line_insets` aren't committed until paint, so the
         // method forms would lag a frame (a one-frame caret jump after an edit
         // that hides/reveals markers).
         let disp_col =
@@ -1327,7 +1334,6 @@ impl Element for EditorElement {
                     t,
                     col,
                     editor.table_left(t, row, &bounds),
-                    &font,
                     font_size,
                     window,
                 )
@@ -1340,30 +1346,22 @@ impl Element for EditorElement {
                 );
                 (Some(c), Vec::new())
             } else {
-                let p = wrapped
+                let caret = wrapped
                     .get(row)
-                    .and_then(|l| line_pos(l, bidi(row), disp_col(row, col), lh))
-                    .unwrap_or_default();
-                let inset = row_x(row);
-                // A row can be taller than its text — grown to fit an inline
-                // formula, or breathing like a list item (LIST_ROW_GAP) — with
-                // the glyphs centered in it. The caret matches the TEXT height
-                // (the row's shaped font size × the ratio, so headings keep
-                // their taller carets), centered the same way, not the row.
-                let text_lh = wrapped
-                    .get(row)
-                    .map_or(base_lh, |l| {
-                        l.unwrapped_layout.font_size * LINE_HEIGHT_RATIO
+                    .and_then(|line| {
+                        projected_caret_bounds(
+                            line,
+                            bidi(row),
+                            disp_col(row, col),
+                            to_screen(top, point(row_x(row), px(0.))),
+                            lh,
+                        )
                     })
-                    .min(lh);
-                let c = fill(
-                    Bounds::new(
-                        to_screen(top, point(p.x + inset, p.y + (lh - text_lh) / 2.)),
-                        size(px(CARET_WIDTH), text_lh),
-                    ),
-                    text_color,
-                );
-                (Some(c), Vec::new())
+                    .map(|mut b| {
+                        b.size.width = px(CARET_WIDTH);
+                        fill(b, text_color)
+                    });
+                (caret, Vec::new())
             }
         } else {
             // Selection tint = the theme accent at low alpha (fallback: a fixed blue).
@@ -1387,6 +1385,7 @@ impl Element for EditorElement {
         };
 
         PrepaintState {
+            stamp: editor.layout_stamp(window),
             wrapped,
             wrap_rows,
             grip,
@@ -2071,6 +2070,11 @@ impl Element for EditorElement {
             }
         }
 
+        let painted_caret = prepaint.cursor.as_ref().map(|q| {
+            let mut bounds = q.bounds;
+            bounds.size.width = px(0.);
+            (self.editor.read(cx).cursor_offset(), bounds)
+        });
         if focus.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()
         {
@@ -2208,6 +2212,9 @@ impl Element for EditorElement {
                     && hb.is_hovered(window)
                 {
                     editor.update(cx, |ed, cx| {
+                        if !ed.layout_current(window) {
+                            return;
+                        }
                         let (bs, be) = ed.drag_block_rows(row);
                         ed.line_drag = Some((bs, be, bs));
                         ed.is_selecting = false;
@@ -2230,7 +2237,10 @@ impl Element for EditorElement {
             window.on_mouse_event(move |e: &MouseMoveEvent, phase, _w, cx| {
                 if phase == gpui::DispatchPhase::Bubble {
                     let ed = editor.read(cx);
-                    let gr = ed.grip_hover_row_at(e.position);
+                    let gr = ed
+                        .layout_current(_w)
+                        .then(|| ed.grip_hover_row_at(e.position))
+                        .flatten();
                     if gr != ed.grip_hover_row {
                         editor.update(cx, |ed, cx| {
                             ed.grip_hover_row = gr;
@@ -2250,7 +2260,9 @@ impl Element for EditorElement {
             window.on_mouse_event(move |e: &MouseMoveEvent, phase, _w, cx| {
                 if phase == gpui::DispatchPhase::Bubble {
                     editor.update(cx, |ed, cx| {
-                        if let Some((bs, be, t)) = ed.line_drag {
+                        if ed.layout_current(_w)
+                            && let Some((bs, be, t)) = ed.line_drag
+                        {
                             let b = ed.snap_drop_boundary(ed.drop_boundary_at(e.position));
                             if b != t {
                                 ed.line_drag = Some((bs, be, b));
@@ -2362,40 +2374,43 @@ impl Element for EditorElement {
             window.set_cursor_style(CursorStyle::PointingHand, hb);
         }
         self.editor.update(cx, |editor, _| {
-            editor.wrapped = wrapped;
-            editor.line_tops = line_tops;
-            editor.line_heights = line_heights;
-            editor.wrap_rows = std::mem::take(&mut prepaint.wrap_rows);
-            editor.widget_rows = widget_rows;
-            editor.offset_maps = offset_maps;
-            editor.chip_rows = chip_rows;
-            editor.line_insets = line_insets;
-            editor.rtl_rows = std::mem::take(&mut prepaint.rtl);
-            editor.table_rows = table_rows;
-            editor.image_rects = image_rects;
-            editor.inline_math_rects = inline_math_rects;
-            editor.prop_pill_rects = prop_pill_rects;
-            editor.link_rects = std::mem::take(&mut prepaint.link_rects);
-            editor.prop_row_rects = prop_row_rects;
-            editor.checkbox_rects = checkbox_rects;
-            editor.table_thumbs = prepaint.table_thumbs.iter().map(|(t, _)| *t).collect();
-            editor.code_chip_rects = code_chip_rects;
-            editor.table_col_resize_rects = table_col_resize_rects;
-            editor.code_card_rects = std::mem::take(&mut prepaint.code_card_rects);
-            editor.alert_fold_rects = alert_fold_rects;
-            editor.heading_fold_rects = heading_fold_rects;
-            editor.heading_row_rects = std::mem::take(&mut prepaint.heading_row_rects);
-            editor.table_row_add_rects = table_row_add_rects;
-            editor.table_col_add_rects = table_col_add_rects;
-            editor.table_hover_zones = table_hover_zones;
-            editor.table_row_del = table_row_del;
-            editor.table_col_del = table_col_del;
-            editor.last_bounds = Some(bounds);
             editor.compensated.set(false);
-            editor.last_paint_gen = editor.content_gen;
-            editor.line_height = base_lh;
-            editor.font_size = font_size;
-            editor.paint_font = Some(font.clone());
+            editor.layout = PublishedLayout {
+                stamp: Some(prepaint.stamp),
+                caret: painted_caret,
+                wrapped,
+                line_tops,
+                line_heights,
+                wrap_rows: std::mem::take(&mut prepaint.wrap_rows),
+                widget_rows,
+                offset_maps,
+                chip_rows,
+                line_insets,
+                rtl_rows: std::mem::take(&mut prepaint.rtl),
+                table_rows,
+                image_rects,
+                inline_math_rects,
+                prop_pill_rects,
+                link_rects: std::mem::take(&mut prepaint.link_rects),
+                prop_row_rects,
+                checkbox_rects,
+                table_thumbs: prepaint.table_thumbs.iter().map(|(t, _)| *t).collect(),
+                code_chip_rects,
+                table_col_resize_rects,
+                code_card_rects: std::mem::take(&mut prepaint.code_card_rects),
+                alert_fold_rects,
+                heading_fold_rects,
+                heading_row_rects: std::mem::take(&mut prepaint.heading_row_rects),
+                table_row_add_rects,
+                table_col_add_rects,
+                table_hover_zones,
+                table_row_del,
+                table_col_del,
+                last_bounds: Some(bounds),
+                line_height: base_lh,
+                font_size,
+                paint_font: Some(font.clone()),
+            };
         });
     }
 }

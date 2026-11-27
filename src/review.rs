@@ -89,6 +89,7 @@ struct Review {
     draft: Draft,
     slot: Slot,
     editor: Entity<EditorState>,
+    scroll: ScrollHandle,
     generation: u64,
     last: Instant,
     status: String,
@@ -98,7 +99,12 @@ struct Review {
 }
 impl Review {
     fn new(c: Candidate, w: &mut Window, cx: &mut Context<Self>) -> Self {
-        let ed = cx.new(|cx| EditorState::new(w, cx).with_text(c.draft.text.clone()));
+        let scroll = ScrollHandle::new();
+        let ed = cx.new(|cx| {
+            EditorState::new(w, cx)
+                .with_viewport_scroll(scroll.clone())
+                .with_text(c.draft.text.clone())
+        });
         let sub = cx.subscribe(&ed, |s: &mut Self, _, event, cx| {
             if matches!(event, EditorEvent::ClipboardWriteFailed) {
                 s.status = "Could not copy the selected text to the clipboard.".into();
@@ -154,6 +160,7 @@ impl Review {
             slot: c.slot,
             draft: c.draft,
             editor: ed,
+            scroll,
             last: Instant::now(),
             status: format!("{disk_status}. Save a separate copy or close to keep this draft."),
             busy: false,
@@ -301,6 +308,7 @@ impl Render for Review {
                     .id("review-text")
                     .flex_1()
                     .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
                     .child(self.editor.clone()),
             )
     }

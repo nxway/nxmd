@@ -783,69 +783,12 @@ pub struct EditorState {
     /// Find-in-feed highlights: match byte ranges + the active index, painted
     /// behind the text like the selection. Host-driven ([`Self::set_search`]).
     search: Option<SearchMatches>,
-    /// Last paint's wrapped lines (one per logical line) and each line's top
-    /// offset relative to the editor's top — both used for hit-testing and
-    /// cursor/IME positioning.
-    wrapped: Vec<WrappedLine>,
-    line_tops: Vec<Pixels>,
-    /// Per-logical-line wrap-row count (from the last paint). Geometry reads
-    /// this, not `wrapped[i].wrap_boundaries()` — a windowed-out line's entry
-    /// in `wrapped` is an empty placeholder.
-    wrap_rows: Vec<usize>,
-    /// Per-logical-line wrap-row height. Variable so a heading (bigger font) gets
-    /// a taller row (W2); `line_height` is the base/fallback for the empty doc
-    /// and any row without a recorded height.
-    line_heights: Vec<Pixels>,
-    /// Per-logical-line table-grid row (from the last paint), so a click /
-    /// Tab / caret hit-tests against cells instead of the raw source line.
-    table_rows: Vec<Option<TableRow>>,
-    /// Hover-revealed "+" add-row / add-column strips for each table (issue #16),
-    /// each paired with the table row to seat the caret in before inserting. From
-    /// the last paint, committed only while the table is hovered; hit-tested on
-    /// mouse-down.
-    table_row_add_rects: Vec<(Bounds<Pixels>, usize)>,
-    table_col_add_rects: Vec<(Bounds<Pixels>, usize, usize)>,
-    /// Each table's hover zone (grid + a thin margin) with its header row,
-    /// committed every paint so `on_mouse_move` can repaint when the pointer's
-    /// table-affordance region changes (the editor otherwise only repaints on
-    /// the caret blink) and `on_scroll_wheel` can hit-test the PAINTED table.
-    table_hover_zones: Vec<(Bounds<Pixels>, usize)>,
     /// The affordance region the pointer was last in — `(table index, 0 = zone /
     /// 1 = below strip / 2 = right strip)` — so the repaint fires only on change.
     table_hover_region: Option<(usize, u8)>,
-    /// Committed delete-handle rects (issue #16): the hovered row's "−" `(bounds,
-    /// row)` and the hovered column's "−" `(bounds, row, col)`, hit-tested on click.
-    table_row_del: Option<(Bounds<Pixels>, usize)>,
-    table_col_del: Option<(Bounds<Pixels>, usize, usize)>,
     /// The table cell `(row, col)` the pointer was last over, so `on_mouse_move`
     /// repaints the delete handles when it changes.
     table_hover_cell: Option<(usize, usize)>,
-    /// Per-logical-line flag: this row is painted as an inline image (W4), so a
-    /// click on it places the caret at the line start instead of hit-testing
-    /// source text. From the last paint.
-    widget_rows: Vec<bool>,
-    /// Per-logical-line display→source byte map for rows with hidden markers
-    /// (W6); `None` when the painted text equals the source. From the last paint.
-    offset_maps: Vec<Option<std::rc::Rc<Vec<usize>>>>,
-    /// Per-logical-line horizontal text inset (and so the caret/selection/hit-test
-    /// inset): non-zero for fenced code blocks and gutter marks (blockquotes,
-    /// lists). From the last paint.
-    line_insets: Vec<Pixels>,
-    /// Per-logical-line right-to-left geometry (#66), `None` on every LTR row
-    /// so an LTR document pays nothing. From the last paint. See [`RtlRow`].
-    rtl_rows: Vec<Option<RtlRow>>,
-    last_bounds: Option<Bounds<Pixels>>,
-    line_height: Pixels,
-    /// Font size from the last paint. Hit-testing that runs during event
-    /// dispatch (e.g. table-cell clicks) must measure at this size — the
-    /// window's text-style stack is unwound there, so `window.text_style()`
-    /// would report the root size, not the host wrapper's.
-    font_size: Pixels,
-    /// The font of the last paint, for the same reason: event-time
-    /// `text_style()` reports the ROOT font, whose family/metrics can differ
-    /// from what the table was painted with (column auto-fit measured with
-    /// the wrong glyph widths and wrapped cells).
-    paint_font: Option<Font>,
     is_selecting: bool,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
@@ -913,23 +856,6 @@ pub struct EditorState {
     /// [`Self::set_block_math_em`]. Inline `$…$` formulas reuse those rasters scaled by
     /// `text_em / this`, so they sit at text size. `None` disables inline math rendering.
     block_math_em: Option<f32>,
-    /// Per-logical-line `src` for rows painted as a file chip (from the last
-    /// paint), so a left-click can open it and a right-click can edit it.
-    chip_rows: Vec<Option<(SharedString, bool)>>,
-    /// Window-space painted bounds of each inline image, with its logical line
-    /// index (from the last paint), so a press near a corner can start a resize
-    /// and know which `![](src)` line to rewrite. One entry per rendered image.
-    image_rects: Vec<(usize, Bounds<Pixels>)>,
-    /// Window-space bounds of each painted task checkbox, with its logical line —
-    /// so a click on the box toggles `[ ]`↔`[x]` instead of placing the caret.
-    checkbox_rects: Vec<(usize, Bounds<Pixels>)>,
-    /// Painted code-card chrome bounds from the last frame (lang tag + Copy per
-    /// code block, keyed by the opening-fence row) — clicks route here before
-    /// caret placement.
-    code_chip_rects: Vec<CodeChipHit>,
-    /// Full card bounds of each code block from the last paint (`(first body
-    /// line, rect)`), for hover tracking — the chrome is hover-revealed.
-    code_card_rects: Vec<(usize, Bounds<Pixels>)>,
     /// The hovered code block's first body line, if any (chrome shows there).
     code_chip_hover: Option<usize>,
     /// Open language picker for a code block: `(opening fence row, anchor)`.
@@ -938,9 +864,6 @@ pub struct EditorState {
     /// Languages the host's highlighter supports, offered in the code block's
     /// language picker. Empty (the default) disables the picker.
     code_langs: Vec<SharedString>,
-    /// Painted chevron bounds of foldable callouts (`(line, rect)`, from the
-    /// last paint) — a click flips the marker's `-`/`+` fold char.
-    alert_fold_rects: Vec<(usize, Bounds<Pixels>)>,
     /// The in-progress corner-grip drag, if any (see [`ImageResize`]). While set,
     /// that image paints at the live width and other mouse handling is suppressed.
     image_resize: Option<ImageResize>,
@@ -948,8 +871,6 @@ pub struct EditorState {
     /// the column resizes live; release persists `cols=` into the table's
     /// marker line. `None` = no drag.
     table_col_resize: Option<TableColResize>,
-    /// Last-paint column-resize grip bands: `(band, header row, column, width)`.
-    table_col_resize_rects: Vec<(Bounds<Pixels>, usize, usize, f32)>,
     /// The band index the pointer is on (repaint-on-change for its accent line).
     table_resize_hover: Option<usize>,
     /// See [`ShapeMemo`] — `RefCell` because the measure closure holds only a
@@ -983,18 +904,14 @@ pub struct EditorState {
     /// edits above a table; entries are clamped at use, so a stale one is a
     /// harmless partial offset. (ponytail: no eviction, the map stays tiny)
     table_scroll_x: std::collections::HashMap<usize, f32>,
-    /// Last-paint wide-table scroll thumbs (padded grab rects), so the thumb
-    /// is mouse-draggable, not just an indicator.
-    table_thumbs: Vec<TableThumb>,
     /// A live thumb drag: `(header row, grab x, scroll offset at grab)`.
     table_thumb_drag: Option<(usize, Pixels, f32)>,
     /// Extra left offset for the drag grip — the host sets its line-number
     /// gutter's width here so the grip sits beside the numbers, not on them.
     grip_inset: Pixels,
-    /// `content_gen` as of the last paint — a measure with the SAME generation
-    /// but different heights means an async (non-edit) height change, the
-    /// scroll-anchoring trigger.
-    last_paint_gen: u64,
+    layout: PublishedLayout,
+    viewport_scroll: Option<ScrollHandle>,
+    presentation_revision: u64,
     /// Bumped on every content mutation — cheap staleness key for caches
     /// (the UTF-16 conversion anchor below; a shape cache later).
     content_gen: u64,
@@ -1009,27 +926,11 @@ pub struct EditorState {
     /// A `$$…$$` block being edited in-line: its byte range + the host-supplied view (the
     /// structural editor) painted in a reserved gap at the block's spot. `None` = none.
     editing_block: Option<EditingBlock>,
-    /// Window-space painted bounds of each inline `$…$` formula + its absolute byte range and
-    /// inner LaTeX (from the last paint), so a click can open its structural editor and the
-    /// seated editor can be positioned at the formula's spot.
-    inline_math_rects: Vec<(Range<usize>, SharedString, Bounds<Pixels>)>,
     /// An inline `$…$` formula under structural edit: its byte range + the host's editor view,
     /// overlaid at the formula's spot. `None` = none.
     editing_inline: Option<EditingInline>,
-    /// Painted bounds + target of each property-panel pill (from the last paint),
-    /// so a left-click opens it (`OpenWikiLink` / `OpenLink`).
-    prop_pill_rects: Vec<(Bounds<Pixels>, zorite_markdown::syntax::LinkHit)>,
-    /// Inline links' painted boxes + targets from the last paint (the same
-    /// geometry as the hand-cursor hitboxes), for hover → `HoverLink`.
-    link_rects: Vec<(Bounds<Pixels>, zorite_markdown::syntax::LinkHit)>,
     /// The link under the pointer, if any — `HoverLink` fires on change.
     hovered_link: Option<(zorite_markdown::syntax::LinkHit, Bounds<Pixels>)>,
-    /// Painted bounds of each property-panel row (from the last paint), so
-    /// `on_mouse_move` repaints when the hovered row changes (the panel's hover
-    /// border reads the live pointer during paint).
-    /// Each painted property-panel row's bounds + its source line (for
-    /// hover borders and the right-click property menu).
-    prop_row_rects: Vec<(Bounds<Pixels>, usize)>,
     /// The property row the pointer was last over — drives `on_mouse_move`'s
     /// repaint-on-change (like the table hover).
     prop_hover_row: Option<usize>,
@@ -1038,16 +939,135 @@ pub struct EditorState {
     /// callouts' `-`/`+`), so folds live for the editor's lifetime and a key
     /// self-heals by vanishing when its heading text is edited.
     folded_headings: std::collections::HashSet<String>,
+    /// The heading line the pointer was last over — its chevron shows on hover
+    /// (a fold chevron on every heading would clutter). Drives
+    /// `on_mouse_move`'s repaint-on-change, like the property-row hover.
+    heading_hover_row: Option<usize>,
+}
+
+/// Geometry for one painted frame. Paint replaces it as a unit. Scroll anchoring
+/// alone deliberately compares against historical heights after invalidation.
+#[derive(Default)]
+struct PublishedLayout {
+    stamp: Option<LayoutStamp>,
+    caret: Option<(usize, Bounds<Pixels>)>,
+    /// Last paint's wrapped lines (one per logical line) and each line's top
+    /// offset relative to the editor's top — both used for hit-testing and
+    /// cursor/IME positioning.
+    wrapped: Vec<WrappedLine>,
+    line_tops: Vec<Pixels>,
+    /// Per-logical-line wrap-row height. Variable so a heading (bigger font) gets
+    /// a taller row (W2); `line_height` is the base/fallback for the empty doc
+    /// and any row without a recorded height.
+    line_heights: Vec<Pixels>,
+    /// Per-logical-line wrap-row count (from the last paint). Geometry reads
+    /// this, not `wrapped[i].wrap_boundaries()` — a windowed-out line's entry
+    /// in `wrapped` is an empty placeholder.
+    wrap_rows: Vec<usize>,
+    /// Per-logical-line flag: this row is painted as an inline image (W4), so a
+    /// click on it places the caret at the line start instead of hit-testing
+    /// source text. From the last paint.
+    widget_rows: Vec<bool>,
+    /// Per-logical-line display→source byte map for rows with hidden markers
+    /// (W6); `None` when the painted text equals the source. From the last paint.
+    offset_maps: Vec<Option<std::rc::Rc<Vec<usize>>>>,
+    /// Per-logical-line `src` for rows painted as a file chip (from the last
+    /// paint), so a left-click can open it and a right-click can edit it.
+    chip_rows: Vec<Option<(SharedString, bool)>>,
+    /// Per-logical-line horizontal text inset (and so the caret/selection/hit-test
+    /// inset): non-zero for fenced code blocks and gutter marks (blockquotes,
+    /// lists). From the last paint.
+    line_insets: Vec<Pixels>,
+    /// Per-logical-line right-to-left geometry (#66), `None` on every LTR row
+    /// so an LTR document pays nothing. From the last paint. See [`RtlRow`].
+    rtl_rows: Vec<Option<RtlRow>>,
+    /// Per-logical-line table-grid row (from the last paint), so a click /
+    /// Tab / caret hit-tests against cells instead of the raw source line.
+    table_rows: Vec<Option<TableRow>>,
+    /// Window-space painted bounds of each inline image, with its logical line
+    /// index (from the last paint), so a press near a corner can start a resize
+    /// and know which `![](src)` line to rewrite. One entry per rendered image.
+    image_rects: Vec<(usize, Bounds<Pixels>)>,
+    /// Window-space painted bounds of each inline `$…$` formula + its absolute byte range and
+    /// inner LaTeX (from the last paint), so a click can open its structural editor and the
+    /// seated editor can be positioned at the formula's spot.
+    inline_math_rects: Vec<(Range<usize>, SharedString, Bounds<Pixels>)>,
+    /// Painted bounds + target of each property-panel pill (from the last paint),
+    /// so a left-click opens it (`OpenWikiLink` / `OpenLink`).
+    prop_pill_rects: Vec<(Bounds<Pixels>, zorite_markdown::syntax::LinkHit)>,
+    /// Inline links' painted boxes + targets from the last paint (the same
+    /// geometry as the hand-cursor hitboxes), for hover → `HoverLink`.
+    link_rects: Vec<(Bounds<Pixels>, zorite_markdown::syntax::LinkHit)>,
+    /// Painted bounds of each property-panel row (from the last paint), so
+    /// `on_mouse_move` repaints when the hovered row changes (the panel's hover
+    /// border reads the live pointer during paint).
+    /// Each painted property-panel row's bounds + its source line (for
+    /// hover borders and the right-click property menu).
+    prop_row_rects: Vec<(Bounds<Pixels>, usize)>,
+    /// Window-space bounds of each painted task checkbox, with its logical line —
+    /// so a click on the box toggles `[ ]`↔`[x]` instead of placing the caret.
+    checkbox_rects: Vec<(usize, Bounds<Pixels>)>,
+    /// Last-paint wide-table scroll thumbs (padded grab rects), so the thumb
+    /// is mouse-draggable, not just an indicator.
+    table_thumbs: Vec<TableThumb>,
+    /// Painted code-card chrome bounds from the last frame (lang tag + Copy per
+    /// code block, keyed by the opening-fence row) — clicks route here before
+    /// caret placement.
+    code_chip_rects: Vec<CodeChipHit>,
+    /// Last-paint column-resize grip bands: `(band, header row, column, width)`.
+    table_col_resize_rects: Vec<(Bounds<Pixels>, usize, usize, f32)>,
+    /// Full card bounds of each code block from the last paint (`(first body
+    /// line, rect)`), for hover tracking — the chrome is hover-revealed.
+    code_card_rects: Vec<(usize, Bounds<Pixels>)>,
+    /// Painted chevron bounds of foldable callouts (`(line, rect)`, from the
+    /// last paint) — a click flips the marker's `-`/`+` fold char.
+    alert_fold_rects: Vec<(usize, Bounds<Pixels>)>,
     /// Painted chevron bounds of heading folds (`(line, rect)`, from the last
     /// paint) — a click toggles that heading in `folded_headings`.
     heading_fold_rects: Vec<(usize, Bounds<Pixels>)>,
     /// Window-space bounds of every heading's first visual row (from the last
     /// paint) — `on_mouse_move` hit-tests these for the hover chevron.
     heading_row_rects: Vec<(usize, Bounds<Pixels>)>,
-    /// The heading line the pointer was last over — its chevron shows on hover
-    /// (a fold chevron on every heading would clutter). Drives
-    /// `on_mouse_move`'s repaint-on-change, like the property-row hover.
-    heading_hover_row: Option<usize>,
+    /// Hover-revealed "+" add-row / add-column strips for each table (issue #16),
+    /// each paired with the table row to seat the caret in before inserting. From
+    /// the last paint, committed only while the table is hovered; hit-tested on
+    /// mouse-down.
+    table_row_add_rects: Vec<(Bounds<Pixels>, usize)>,
+    table_col_add_rects: Vec<(Bounds<Pixels>, usize, usize)>,
+    /// Each table's hover zone (grid + a thin margin) with its header row,
+    /// committed every paint so `on_mouse_move` can repaint when the pointer's
+    /// table-affordance region changes (the editor otherwise only repaints on
+    /// the caret blink) and `on_scroll_wheel` can hit-test the PAINTED table.
+    table_hover_zones: Vec<(Bounds<Pixels>, usize)>,
+    /// Committed delete-handle rects (issue #16): the hovered row's "−" `(bounds,
+    /// row)` and the hovered column's "−" `(bounds, row, col)`, hit-tested on click.
+    table_row_del: Option<(Bounds<Pixels>, usize)>,
+    table_col_del: Option<(Bounds<Pixels>, usize, usize)>,
+    last_bounds: Option<Bounds<Pixels>>,
+    line_height: Pixels,
+    /// Font size from the last paint. Hit-testing that runs during event
+    /// dispatch (e.g. table-cell clicks) must measure at this size — the
+    /// window's text-style stack is unwound there, so `window.text_style()`
+    /// would report the root size, not the host wrapper's.
+    font_size: Pixels,
+    /// The font of the last paint, for the same reason: event-time
+    /// `text_style()` reports the ROOT font, whose family/metrics can differ
+    /// from what the table was painted with (column auto-fit measured with
+    /// the wrong glyph widths and wrapped cells).
+    paint_font: Option<Font>,
+}
+
+/// Source and IME preedit share the displayed buffer revision. Presentation
+/// changes (including decoded images) do not advance it or notify persistence.
+#[derive(Clone, Copy, PartialEq)]
+struct LayoutStamp {
+    display_revision: u64,
+    presentation_revision: u64,
+    // A focused Live Preview selection can reveal delimiters or whole blocks.
+    reveal: Option<(usize, usize, bool)>,
+    viewport: gpui::Size<Pixels>,
+    scroll_offset: Option<Point<Pixels>>,
+    scale: f32,
 }
 
 /// A math block under in-line structural edit: the byte range to overwrite on commit, and
@@ -1073,9 +1093,78 @@ struct EditingInline {
 }
 
 impl EditorState {
+    fn reveal_inputs(&self, focused: bool) -> Option<(usize, usize, bool)> {
+        (focused && self.markdown_style.is_some()).then_some((
+            self.selected_range.start,
+            self.selected_range.end,
+            self.selection_reversed,
+        ))
+    }
+
+    fn layout_stamp(&self, window: &Window) -> LayoutStamp {
+        LayoutStamp {
+            display_revision: self.content_gen,
+            presentation_revision: self.presentation_revision,
+            reveal: self.reveal_inputs(self.focus_handle.is_focused(window)),
+            viewport: window.viewport_size(),
+            scroll_offset: self.viewport_scroll.as_ref().map(ScrollHandle::offset),
+            scale: window.scale_factor(),
+        }
+    }
+
+    fn layout_current(&self, window: &Window) -> bool {
+        self.layout.stamp.is_some_and(|stamp| {
+            stamp.viewport == window.viewport_size()
+                && stamp.scale == window.scale_factor()
+                && self.matches_display(
+                    stamp,
+                    self.reveal_inputs(self.focus_handle.is_focused(window)),
+                )
+        })
+    }
+
+    // Windowless host queries use the same comparison for all editor-owned
+    // inputs. Resize and focus observers withdraw these rows on window changes.
+    fn has_current_rows(&self) -> bool {
+        self.layout.stamp.is_some_and(|stamp| {
+            let current = self.reveal_inputs(stamp.reveal.is_some());
+            self.matches_display(stamp, current)
+        })
+    }
+
+    fn matches_display(&self, stamp: LayoutStamp, reveal: Option<(usize, usize, bool)>) -> bool {
+        stamp.display_revision == self.content_gen
+            && stamp.presentation_revision == self.presentation_revision
+            && stamp.scroll_offset == self.viewport_scroll.as_ref().map(ScrollHandle::offset)
+            && stamp.reveal == reveal
+    }
+
+    fn invalidate_presentation(&mut self) {
+        self.presentation_revision = self.presentation_revision.wrapping_add(1);
+        self.shape_memo.get_mut().take();
+    }
+
+    /// Hosts changing the editor wrapper's width or inherited text style
+    /// between frames can withdraw its published geometry immediately.
+    pub fn refresh_layout(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_presentation();
+        cx.notify();
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        cx.on_blur(&focus_handle, window, |editor, _, cx| {
+        cx.observe_window_bounds(window, |editor, _, cx| editor.refresh_layout(cx))
+            .detach();
+        cx.on_focus(&focus_handle, window, |editor, window, cx| {
+            if !editor.layout_current(window) {
+                editor.refresh_layout(cx);
+            }
+        })
+        .detach();
+        cx.on_blur(&focus_handle, window, |editor, window, cx| {
+            if !editor.layout_current(window) {
+                editor.refresh_layout(cx);
+            }
             if editor.cancel_composition() {
                 cx.notify();
             }
@@ -1091,26 +1180,8 @@ impl EditorState {
             composition: None,
             clipboard_writer: None,
             search: None,
-            wrapped: Vec::new(),
-            line_tops: Vec::new(),
-            line_heights: Vec::new(),
-            wrap_rows: Vec::new(),
-            widget_rows: Vec::new(),
-            offset_maps: Vec::new(),
-            line_insets: Vec::new(),
-            rtl_rows: Vec::new(),
-            table_rows: Vec::new(),
-            table_row_add_rects: Vec::new(),
-            table_col_add_rects: Vec::new(),
-            table_hover_zones: Vec::new(),
             table_hover_region: None,
-            table_row_del: None,
-            table_col_del: None,
             table_hover_cell: None,
-            last_bounds: None,
-            line_height: px(20.),
-            font_size: px(16.),
-            paint_font: None,
             is_selecting: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -1136,31 +1207,25 @@ impl EditorState {
             code_highlight: None,
             auto_replace: None,
             last_replaced: None,
-            chip_rows: Vec::new(),
-            image_rects: Vec::new(),
-            checkbox_rects: Vec::new(),
-            code_chip_rects: Vec::new(),
-            code_card_rects: Vec::new(),
             code_chip_hover: None,
             code_lang_menu: None,
             code_lang_scroll: ScrollHandle::new(),
             code_langs: Vec::new(),
-            alert_fold_rects: Vec::new(),
             image_resize: None,
             table_col_resize: None,
-            table_col_resize_rects: Vec::new(),
             table_resize_hover: None,
             shape_memo: std::cell::RefCell::new(None),
             scan_cache: std::cell::RefCell::new(None),
             scroll_compensator: None,
-            last_paint_gen: 0,
+            layout: PublishedLayout::default(),
+            viewport_scroll: None,
+            presentation_revision: 0,
             shape_caches: ShapeCaches::default(),
             shape_band: std::cell::Cell::new(None),
             compensated: std::cell::Cell::new(false),
             line_drag: None,
             grip_hover_row: None,
             table_scroll_x: std::collections::HashMap::new(),
-            table_thumbs: Vec::new(),
             table_thumb_drag: None,
             grip_inset: px(0.),
             content_gen: 0,
@@ -1168,16 +1233,10 @@ impl EditorState {
             structural_editors: true,
             utf16_anchor: std::cell::Cell::new((0, 0, 0)),
             editing_block: None,
-            inline_math_rects: Vec::new(),
             editing_inline: None,
-            prop_pill_rects: Vec::new(),
-            link_rects: Vec::new(),
             hovered_link: None,
-            prop_row_rects: Vec::new(),
             prop_hover_row: None,
             folded_headings: std::collections::HashSet::new(),
-            heading_fold_rects: Vec::new(),
-            heading_row_rects: Vec::new(),
             heading_hover_row: None,
         }
     }
@@ -1194,6 +1253,13 @@ impl EditorState {
     /// Use source editing on entry to math and properties when the host has no popup editors.
     pub fn with_source_navigation(mut self) -> Self {
         self.structural_editors = false;
+        self
+    }
+
+    /// Bind the scroll handle of the containing viewport. Pending scrolls move
+    /// the document relative to window-space input before GPUI paints again.
+    pub fn with_viewport_scroll(mut self, scroll: ScrollHandle) -> Self {
+        self.viewport_scroll = Some(scroll);
         self
     }
 
@@ -1346,6 +1412,7 @@ impl EditorState {
     /// Replace the set of diagnostics (underlined spans). The host computes these
     /// (e.g. spell-check) and refreshes them as the text changes.
     pub fn set_diagnostics(&mut self, diagnostics: Vec<Diagnostic>, cx: &mut Context<Self>) {
+        self.invalidate_presentation();
         self.diagnostics = diagnostics;
         // Diagnostics feed the per-row run keys (they underline spans) — drop
         // the memo so the next shape re-keys affected lines.
@@ -1374,6 +1441,7 @@ impl EditorState {
     }
 
     pub fn set_markdown_style(&mut self, style: SyntaxStyle, cx: &mut Context<Self>) {
+        self.invalidate_presentation();
         self.markdown_style = Some(style);
         cx.notify();
     }
@@ -1390,6 +1458,7 @@ impl EditorState {
     /// switched off; a no-op if styling was already off.
     pub fn clear_markdown_style(&mut self, cx: &mut Context<Self>) {
         if self.markdown_style.take().is_some() {
+            self.invalidate_presentation();
             cx.notify();
         }
     }
@@ -1409,14 +1478,14 @@ impl EditorState {
     /// nxmd: invalidate presentation after an asynchronous image load; source and
     /// undo history are untouched.
     pub fn refresh_images(&mut self, cx: &mut Context<Self>) {
-        *self.shape_memo.borrow_mut() = None;
-        cx.notify();
+        self.refresh_layout(cx);
     }
 
     pub fn set_block_image_provider(
         &mut self,
         provider: impl Fn(&str) -> Option<Arc<RenderImage>> + 'static,
     ) {
+        self.invalidate_presentation();
         self.block_image = Some(Box::new(provider));
     }
 
@@ -1428,6 +1497,7 @@ impl EditorState {
         &mut self,
         provider: impl Fn(&str) -> Option<SharedString> + 'static,
     ) {
+        self.invalidate_presentation();
         self.block_chip = Some(Box::new(provider));
     }
 
@@ -1439,6 +1509,7 @@ impl EditorState {
         &mut self,
         provider: impl Fn(&str) -> Option<(gpui::AnyView, Pixels)> + 'static,
     ) {
+        self.invalidate_presentation();
         self.embed_view = Some(Box::new(provider));
     }
 
@@ -1452,6 +1523,7 @@ impl EditorState {
         &mut self,
         provider: impl Fn(&str) -> Option<(Arc<RenderImage>, f32, f32)> + 'static,
     ) {
+        self.invalidate_presentation();
         self.block_mermaid = Some(Box::new(provider));
     }
 
@@ -1485,15 +1557,19 @@ impl EditorState {
     /// last layout) — for a host scrolling a find match into view. `None`
     /// before first paint or for an out-of-range offset.
     pub fn offset_screen_top(&self, offset: usize) -> Option<Pixels> {
-        let bounds = self.last_bounds?;
+        if !self.has_current_rows() {
+            return None;
+        }
+        let bounds = self.layout.last_bounds?;
         let (row, _) = self.row_col(offset.min(self.content.len()));
-        Some(bounds.top() + self.line_tops.get(row).copied()?)
+        Some(bounds.top() + self.layout.line_tops.get(row).copied()?)
     }
 
     pub fn set_block_math_provider(
         &mut self,
         provider: impl Fn(&str) -> Option<(Arc<RenderImage>, f32, f32)> + 'static,
     ) {
+        self.invalidate_presentation();
         self.block_math = Some(Box::new(provider));
     }
 
@@ -1502,6 +1578,7 @@ impl EditorState {
     /// raster for the same LaTeX, scaled by `text_em / em` so it sits at text size. Pre-render
     /// inline sources too (see [`inline_math_sources`]).
     pub fn set_block_math_em(&mut self, em: f32) {
+        self.invalidate_presentation();
         self.block_math_em = (em > 0.).then_some(em);
     }
 
@@ -1510,6 +1587,7 @@ impl EditorState {
         &mut self,
         f: impl Fn(&str, &str) -> Vec<(Range<usize>, HighlightStyle)> + 'static,
     ) {
+        self.invalidate_presentation();
         self.code_highlight = Some(Box::new(f));
     }
 
@@ -1583,6 +1661,7 @@ impl EditorState {
         height: Pixels,
         cx: &mut Context<Self>,
     ) {
+        self.invalidate_presentation();
         self.editing_block = Some(EditingBlock {
             range,
             view,
@@ -1608,6 +1687,7 @@ impl EditorState {
     /// End an in-line math edit (the host has committed / cancelled). Returns the block's
     /// byte range, so the host can overwrite it.
     pub fn end_editing_block(&mut self, cx: &mut Context<Self>) -> Option<Range<usize>> {
+        self.invalidate_presentation();
         let range = self.editing_block.take().map(|eb| eb.range);
         cx.notify();
         range
@@ -1771,7 +1851,8 @@ impl EditorState {
             let Some(inner) = zorite_markdown::syntax::embed_line(line) else {
                 continue;
             };
-            let (Some(top), Some((view, height))) = (self.line_tops.get(row), provider(inner))
+            let (Some(top), Some((view, height))) =
+                (self.layout.line_tops.get(row), provider(inner))
             else {
                 continue;
             };
@@ -1797,8 +1878,8 @@ impl EditorState {
     fn editing_block_overlay(&self) -> Option<gpui::Div> {
         let eb = self.editing_block.as_ref()?;
         let row = self.row_col(eb.range.start).0;
-        let top = *self.line_tops.get(row)?;
-        let height = *self.line_heights.get(row)?;
+        let top = *self.layout.line_tops.get(row)?;
+        let height = *self.layout.line_heights.get(row)?;
         Some(
             div()
                 .absolute()
@@ -1821,10 +1902,14 @@ impl EditorState {
     fn editing_inline_overlay(&self) -> Option<gpui::Div> {
         let ei = self.editing_inline.as_ref()?;
         let (_, _, rect) = self
+            .layout
             .inline_math_rects
             .iter()
             .find(|(r, _, _)| *r == ei.range)?;
-        let origin = self.last_bounds.map_or(Point::default(), |b| b.origin);
+        let origin = self
+            .layout
+            .last_bounds
+            .map_or(Point::default(), |b| b.origin);
         Some(
             div()
                 .absolute()
@@ -1838,6 +1923,7 @@ impl EditorState {
     /// Spaces inserted per Tab / list-nesting level (`Indent`/`Outdent`). The host
     /// keeps this in sync with its list-indent setting so nesting is configurable.
     pub fn set_tab_indent(&mut self, spaces: usize) {
+        self.invalidate_presentation();
         self.tab_indent = spaces.max(1);
     }
 
@@ -1871,9 +1957,13 @@ impl EditorState {
     /// gutter (line numbers) to align with rows without re-deriving layout.
     /// Empty before the first paint. Rows collapsed by a heading fold show
     /// no vertical advance (the next row's top equals theirs) — a gutter
-    /// should skip those.
+    /// should skip those. Stale publications also return an empty list.
     pub fn row_layout(&self) -> Vec<(Pixels, Pixels)> {
-        self.line_tops
+        if !self.has_current_rows() {
+            return Vec::new();
+        }
+        self.layout
+            .line_tops
             .iter()
             .enumerate()
             .map(|(row, &top)| (top, self.line_h(row)))
@@ -1913,29 +2003,31 @@ impl EditorState {
 
     /// The wrap-row count of logical line `row` (1 when unrecorded).
     fn row_span(&self, row: usize) -> usize {
-        self.wrap_rows.get(row).copied().unwrap_or(1).max(1)
+        self.layout.wrap_rows.get(row).copied().unwrap_or(1).max(1)
     }
 
     /// The wrap-row height of logical line `row` (a heading is taller). Falls
     /// back to the base `line_height` for unrecorded rows / the empty document.
     fn line_h(&self, row: usize) -> Pixels {
-        self.line_heights
+        self.layout
+            .line_heights
             .get(row)
             .copied()
-            .unwrap_or(self.line_height)
+            .unwrap_or(self.layout.line_height)
     }
 
     /// Horizontal text inset for logical line `row` (from the last paint): non-zero
     /// for fenced code blocks + gutter marks. Applied to the caret, selection,
     /// hit-test, and text paint so they all stay aligned.
     fn line_inset(&self, row: usize) -> Pixels {
-        self.line_insets.get(row).copied().unwrap_or(px(0.))
+        self.layout.line_insets.get(row).copied().unwrap_or(px(0.))
     }
 
     /// The right-align shift of an RTL row (zero everywhere else) — see
     /// [`RtlRow::shift`].
     fn rtl_shift(&self, row: usize) -> Pixels {
-        self.rtl_rows
+        self.layout
+            .rtl_rows
             .get(row)
             .and_then(Option::as_ref)
             .and_then(|r| r.shifts.first().copied())
@@ -1955,7 +2047,8 @@ impl EditorState {
     /// visual arrows map to the opposite step.
     fn caret_table_is_rtl(&self) -> bool {
         let (row, _) = self.row_col(self.cursor_offset());
-        self.table_rows
+        self.layout
+            .table_rows
             .get(row)
             .and_then(Option::as_ref)
             .is_some_and(|t| t.rtl)
@@ -1969,7 +2062,8 @@ impl EditorState {
     /// one, so the two step functions swap.
     fn caret_row_is_rtl(&self) -> bool {
         let (row, _) = self.row_col(self.cursor_offset());
-        self.rtl_rows
+        self.layout
+            .rtl_rows
             .get(row)
             .and_then(Option::as_ref)
             .is_some_and(|r| r.base_rtl)
@@ -1977,9 +2071,16 @@ impl EditorState {
 
     /// The offset one step to the visual left/right of the caret, taking the
     /// row's direction into account.
-    fn horizontal_step(&self, visual_right: bool) -> usize {
+    fn horizontal_step(&self, visual_right: bool, window: &Window) -> usize {
         let off = self.cursor_offset();
         let (row, col) = self.row_col(off);
+        if !self.layout_current(window) {
+            return if visual_right {
+                self.next_boundary(off)
+            } else {
+                self.previous_boundary(off)
+            };
+        }
         // Inside a bidi row, "one step right" is not "one byte forward, maybe
         // flipped". A Latin word or URL embedded in Persian runs the other way,
         // and the caret has to flow THROUGH it rather than jump to its far end
@@ -2052,21 +2153,37 @@ impl EditorState {
 
     /// The RTL layout for `row`, if it has one (see [`RtlRow`]).
     fn bidi_map(&self, row: usize) -> Option<&RtlRow> {
-        self.rtl_rows.get(row).and_then(Option::as_ref)
+        self.layout.rtl_rows.get(row).and_then(Option::as_ref)
     }
 
     /// Window-space bounds of the caret at `offset`, from the last paint's
     /// layout — for anchoring a popup (e.g. a slash menu) at a document offset.
-    /// `None` before the first paint or if `offset`'s row isn't laid out.
+    /// Returns `None` before a compatible paint or for an unavailable widget position.
     pub fn bounds_for_offset(&self, offset: usize) -> Option<Bounds<Pixels>> {
-        let bounds = self.last_bounds?;
+        if !self.has_current_rows() {
+            return None;
+        }
+        let bounds = self.layout.last_bounds?;
         let (row, col) = self.row_col(offset);
-        let lh = self.line_h(row);
-        let line = self.wrapped.get(row)?;
-        let p = line_pos(line, self.bidi_map(row), self.display_col(row, col), lh)?;
-        let top = bounds.top() + self.line_tops.get(row).copied().unwrap_or(px(0.)) + p.y;
-        let x = bounds.left() + p.x + self.row_origin_x(row);
-        Some(Bounds::from_corners(point(x, top), point(x, top + lh)))
+        if self.layout.table_rows.get(row)?.is_some() || *self.layout.widget_rows.get(row)? {
+            // Widget/table rows have no ordinary shaped source line. The
+            // actual caret rectangle was resolved (including cell wraps) at paint.
+            return self
+                .layout
+                .caret
+                .filter(|(at, _)| *at == offset)
+                .map(|(_, b)| b);
+        }
+        projected_caret_bounds(
+            self.layout.wrapped.get(row)?,
+            self.bidi_map(row),
+            self.display_col(row, col),
+            point(
+                bounds.left() + self.row_origin_x(row),
+                bounds.top() + *self.layout.line_tops.get(row)?,
+            ),
+            self.line_h(row),
+        )
     }
 
     /// The document text as an owned [`SharedString`]; use [`Self::text`] for a
@@ -2105,11 +2222,11 @@ impl EditorState {
 
     // --- Cursor movement -----------------------------------------------------
 
-    fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+    fn left(&mut self, _: &Left, window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
             // Collapse to the selection's VISUALLY left edge, which on an RTL
             // row is its logical end.
-            let to = if self.caret_row_is_rtl() {
+            let to = if self.layout_current(window) && self.caret_row_is_rtl() {
                 self.selected_range.end
             } else {
                 self.selected_range.start
@@ -2118,13 +2235,18 @@ impl EditorState {
             return;
         }
         if self.caret_in_table()
-            && let Some(off) =
-                self.table_move_horizontal(if self.caret_table_is_rtl() { 1 } else { -1 })
+            && let Some(off) = self.table_move_horizontal(
+                if self.layout_current(window) && self.caret_table_is_rtl() {
+                    1
+                } else {
+                    -1
+                },
+            )
         {
             self.move_to(off, cx);
             return;
         }
-        let off = self.horizontal_step(false);
+        let off = self.horizontal_step(false, window);
         if let Some((range, source)) = self.inline_math_span_at(off) {
             cx.emit(EditorEvent::EditMath {
                 range,
@@ -2156,9 +2278,9 @@ impl EditorState {
         self.move_to(off, cx);
     }
 
-    fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+    fn right(&mut self, _: &Right, window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
-            let to = if self.caret_row_is_rtl() {
+            let to = if self.layout_current(window) && self.caret_row_is_rtl() {
                 self.selected_range.start
             } else {
                 self.selected_range.end
@@ -2167,13 +2289,18 @@ impl EditorState {
             return;
         }
         if self.caret_in_table()
-            && let Some(off) =
-                self.table_move_horizontal(if self.caret_table_is_rtl() { -1 } else { 1 })
+            && let Some(off) = self.table_move_horizontal(
+                if self.layout_current(window) && self.caret_table_is_rtl() {
+                    -1
+                } else {
+                    1
+                },
+            )
         {
             self.move_to(off, cx);
             return;
         }
-        let off = self.horizontal_step(true);
+        let off = self.horizontal_step(true, window);
         if let Some((range, source)) = self.inline_math_span_at(off) {
             cx.emit(EditorEvent::EditMath {
                 range,
@@ -2214,7 +2341,7 @@ impl EditorState {
             self.move_to(off, cx);
             return;
         }
-        let target = self.move_vertical(-1);
+        let target = self.move_vertical(-1, window);
         let off = self.caret_boundary(target);
         if let Some((range, source)) = self.inline_math_span_at(off) {
             cx.emit(EditorEvent::EditMath {
@@ -2259,7 +2386,7 @@ impl EditorState {
             self.move_to(off, cx);
             return;
         }
-        let target = self.move_vertical(1);
+        let target = self.move_vertical(1, window);
         let off = self.caret_boundary(target);
         if let Some((range, source)) = self.inline_math_span_at(off) {
             cx.emit(EditorEvent::EditMath {
@@ -2295,29 +2422,29 @@ impl EditorState {
         cx.notify();
     }
 
-    fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
         self.goal_x = None;
-        let off = self.horizontal_step(false);
+        let off = self.horizontal_step(false, window);
         self.select_to(off, cx);
     }
 
-    fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
         self.goal_x = None;
-        let off = self.horizontal_step(true);
+        let off = self.horizontal_step(true, window);
         self.select_to(off, cx);
     }
 
     fn select_up(&mut self, _: &SelectUp, window: &mut Window, cx: &mut Context<Self>) {
         let off = self
             .table_move_visual(-1, window)
-            .unwrap_or_else(|| self.move_vertical(-1));
+            .unwrap_or_else(|| self.move_vertical(-1, window));
         self.select_to(off, cx);
     }
 
     fn select_down(&mut self, _: &SelectDown, window: &mut Window, cx: &mut Context<Self>) {
         let off = self
             .table_move_visual(1, window)
-            .unwrap_or_else(|| self.move_vertical(1));
+            .unwrap_or_else(|| self.move_vertical(1, window));
         self.select_to(off, cx);
     }
 
@@ -3330,6 +3457,10 @@ impl EditorState {
             cx.notify();
             return;
         }
+        if !self.layout_current(window) {
+            cx.notify();
+            return;
+        }
         // A press on an image's corner grip starts a resize drag — this takes
         // precedence over placing the caret on the image row (which the press
         // would otherwise do). The image keeps its bounds; the drag previews a new
@@ -3403,6 +3534,7 @@ impl EditorState {
             let start = self.line_starts()[row];
             let end = self.line_end(row);
             let key = self.content[start..end].trim().to_string();
+            self.invalidate_presentation();
             if !self.folded_headings.remove(&key) {
                 // Folding with the caret inside the section would no-op
                 // (reveal-on-caret keeps it open) — seat the caret at the
@@ -3451,6 +3583,7 @@ impl EditorState {
             && !event.modifiers.shift
             && !event.modifiers.control
             && let Some((_, hit)) = self
+                .layout
                 .prop_pill_rects
                 .iter()
                 .find(|(b, _)| b.contains(&event.position))
@@ -3577,7 +3710,7 @@ impl EditorState {
         }
         // A press on a row/column delete "−" handle removes that row/column (seat
         // the caret in it, then reuse the caret-driven delete APIs).
-        if let Some((rect, row)) = self.table_row_del
+        if let Some((rect, row)) = self.layout.table_row_del
             && rect.contains(&event.position)
         {
             if let Some(off) = self.cell_start_offset(row, 0) {
@@ -3586,7 +3719,7 @@ impl EditorState {
             }
             return;
         }
-        if let Some((rect, row, col)) = self.table_col_del
+        if let Some((rect, row, col)) = self.layout.table_col_del
             && rect.contains(&event.position)
         {
             if let Some(off) = self.cell_start_offset(row, col) {
@@ -3598,6 +3731,7 @@ impl EditorState {
         // A press on a wide table's scroll thumb starts a thumb drag — the
         // table scrolls with the pointer (see `on_mouse_move`).
         if let Some(&TableThumb { header, .. }) = self
+            .layout
             .table_thumbs
             .iter()
             .find(|t| t.grab.contains(&event.position))
@@ -3613,6 +3747,7 @@ impl EditorState {
         // auto-fits the column to its content instead (the Excel/Sheets
         // convention for a column border).
         if let Some(&(_, header_row, col, width)) = self
+            .layout
             .table_col_resize_rects
             .iter()
             .find(|(band, ..)| band.contains(&event.position))
@@ -3634,9 +3769,7 @@ impl EditorState {
         }
         // A click on a table cell drops the caret inside the cell, not in the raw
         // `| … |` source.
-        let offset = self
-            .table_offset_at(event.position, window)
-            .unwrap_or_else(|| self.index_for_mouse_position(event.position));
+        let offset = self.source_at_point(event.position, window);
         self.menu = None;
         self.table_menu = None;
         self.image_menu = None;
@@ -3745,12 +3878,17 @@ impl EditorState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.layout_current(window) {
+            cx.notify();
+            return;
+        }
         // Link under the pointer → `HoverLink` on change (a host shows a preview
         // card there). Painted boxes from the last frame, like the hand cursor.
         let over_link = self
+            .layout
             .link_rects
             .iter()
-            .chain(self.prop_pill_rects.iter())
+            .chain(self.layout.prop_pill_rects.iter())
             .find(|(b, _)| b.contains(&event.position))
             .map(|(b, hit)| (hit.clone(), *b));
         if over_link != self.hovered_link {
@@ -3777,6 +3915,7 @@ impl EditorState {
         // travel maps to content scroll through the committed factor.
         if let Some((header, grab_x, start_sx)) = self.table_thumb_drag {
             let factor = self
+                .layout
                 .table_thumbs
                 .iter()
                 .find(|t| t.header == header)
@@ -3786,6 +3925,7 @@ impl EditorState {
             // sane stored value keeps other consumers simple.
             let sx = sx.max(0.);
             if self.table_scroll_x.get(&header).copied().unwrap_or(0.) != sx {
+                self.invalidate_presentation();
                 self.table_scroll_x.insert(header, sx);
                 cx.notify();
             }
@@ -3800,11 +3940,13 @@ impl EditorState {
             if let Some(r) = self.table_col_resize.as_mut() {
                 r.width = width;
             }
+            self.invalidate_presentation();
             cx.notify();
             return;
         }
         if let Some(resize) = self.image_resize {
             let avail = self
+                .layout
                 .last_bounds
                 .map_or(f32::MAX, |b| f32::from(b.size.width))
                 - f32::from(self.line_inset(resize.line));
@@ -3814,13 +3956,12 @@ impl EditorState {
             if let Some(r) = self.image_resize.as_mut() {
                 r.width = width;
             }
+            self.invalidate_presentation();
             cx.notify();
             return;
         }
         if self.is_selecting {
-            let offset = self
-                .table_offset_at(event.position, window)
-                .unwrap_or_else(|| self.index_for_mouse_position(event.position));
+            let offset = self.source_at_point(event.position, window);
             self.select_to(offset, cx);
             return;
         }
@@ -3842,6 +3983,7 @@ impl EditorState {
         // Repaint the column-resize border accent as the pointer crosses a band
         // (the cursor comes from the hitbox; the painted line needs a frame).
         let on_band = self
+            .layout
             .table_col_resize_rects
             .iter()
             .position(|(b, ..)| b.contains(&event.position));
@@ -3852,6 +3994,7 @@ impl EditorState {
         // Repaint the property-panel hover border when the pointer moves between
         // rows (the border itself reads the live pointer during paint).
         let prow = self
+            .layout
             .prop_row_rects
             .iter()
             .position(|(b, _)| b.contains(&event.position));
@@ -3862,6 +4005,7 @@ impl EditorState {
         // Repaint the heading fold chevron when the pointer enters/leaves a
         // heading row (the chevron is hover-revealed).
         let hrow = self
+            .layout
             .heading_row_rects
             .iter()
             .find_map(|(row, b)| b.contains(&event.position).then_some(*row));
@@ -3872,6 +4016,7 @@ impl EditorState {
         // Repaint the code card's chrome (lang tag + Copy) when the pointer
         // enters/leaves a card — it's hover-revealed.
         let ccard = self
+            .layout
             .code_card_rects
             .iter()
             .find_map(|(row, b)| b.contains(&event.position).then_some(*row));
@@ -3969,11 +4114,16 @@ impl EditorState {
             cx.notify();
             return;
         }
+        if !self.layout_current(window) {
+            cx.notify();
+            return;
+        }
         // Right-click on an inline image: Word-style object menu (Delete) — the
         // row renders as a picture, there's no text under the pointer to edit.
         // Only for real `![](src)` rows: mermaid/math rasters share the widget
         // type but delete as text (their menu would silently no-op).
         if let Some(&(line, _)) = self
+            .layout
             .image_rects
             .iter()
             .find(|(_, rect)| rect.contains(&event.position))
@@ -3989,6 +4139,7 @@ impl EditorState {
         // Right-click a property-panel row: Edit / Delete property menu — the
         // panel renders as a widget, there's no text under the pointer.
         if let Some(&(_, row)) = self
+            .layout
             .prop_row_rects
             .iter()
             .find(|(rect, _)| rect.contains(&event.position))
@@ -4351,6 +4502,7 @@ impl EditorState {
     /// Extra left offset for the gutter drag grip (e.g. the host's
     /// line-number gutter width), so the grip clears other gutter chrome.
     pub fn set_grip_inset(&mut self, inset: Pixels) {
+        self.invalidate_presentation();
         self.grip_inset = inset;
     }
 
@@ -4413,7 +4565,7 @@ impl EditorState {
     /// The row whose gutter grip the pointer would hover (the event-time
     /// mirror of prepaint's grip computation, for repaint change-detection).
     fn grip_hover_row_at(&self, position: Point<Pixels>) -> Option<usize> {
-        let bounds = self.last_bounds?;
+        let bounds = self.layout.last_bounds?;
         if self.markdown_style.is_none()
             || self.line_drag.is_some()
             || position.x < grip_left(bounds.origin.x, self.grip_inset) - px(4.)
@@ -4424,26 +4576,26 @@ impl EditorState {
             return None;
         }
         let y = position.y - bounds.origin.y;
-        (0..self.line_tops.len()).find(|&i| {
+        (0..self.layout.line_tops.len()).find(|&i| {
             let h = self.line_h(i) * self.row_span(i) as f32;
-            h > px(0.5) && y >= self.line_tops[i] && y < self.line_tops[i] + h
+            h > px(0.5) && y >= self.layout.line_tops[i] && y < self.layout.line_tops[i] + h
         })
     }
 
     /// The drop boundary (a between-rows index) nearest the pointer, from the
     /// last paint's committed geometry.
     fn drop_boundary_at(&self, position: Point<Pixels>) -> usize {
-        let Some(bounds) = self.last_bounds else {
+        let Some(bounds) = self.layout.last_bounds else {
             return 0;
         };
         let y = position.y - bounds.origin.y;
-        for i in 0..self.line_tops.len() {
-            let mid = self.line_tops[i] + self.line_h(i) * self.row_span(i) as f32 / 2.;
+        for i in 0..self.layout.line_tops.len() {
+            let mid = self.layout.line_tops[i] + self.line_h(i) * self.row_span(i) as f32 / 2.;
             if y < mid {
                 return i;
             }
         }
-        self.line_tops.len()
+        self.layout.line_tops.len()
     }
 
     /// Clamp a drop boundary out of the interior of any rendered region — a
@@ -4585,22 +4737,9 @@ impl EditorState {
     }
 
     /// The caret's bounds in window space (its painted Y range), or `None` before
-    /// the first paint. Lets a host scroll the caret into view; computed from the
-    /// layout stored at the last paint, so it's valid for caret moves that don't
-    /// change the text (arrow keys, click).
+    /// publication or while the displayed source or projection needs a new frame.
     pub fn caret_screen_bounds(&self) -> Option<Bounds<Pixels>> {
-        let bounds = self.last_bounds?;
-        let (row, col) = self.row_col(self.cursor_offset());
-        let lh = self.line_h(row);
-        let p = self
-            .wrapped
-            .get(row)?
-            .position_for_index(self.display_col(row, col), lh)?;
-        let top = bounds.top() + self.line_tops.get(row).copied().unwrap_or(px(0.)) + p.y;
-        Some(Bounds::from_corners(
-            point(bounds.left(), top),
-            point(bounds.left(), top + lh),
-        ))
+        self.bounds_for_offset(self.cursor_offset())
     }
 
     fn cursor_offset(&self) -> usize {
@@ -4639,6 +4778,11 @@ impl EditorState {
     }
 
     fn invalidate_content(&mut self) {
+        self.image_resize = None;
+        self.table_col_resize = None;
+        self.table_thumb_drag = None;
+        self.line_drag = None;
+        self.is_selecting = false;
         self.content_gen += 1;
         self.index.take();
         self.shape_memo.get_mut().take();
@@ -4719,8 +4863,8 @@ impl EditorState {
     /// Offset one *visual* row up/down from the caret, preserving the goal column
     /// (x) across the run. Falls back to logical-line movement before the first
     /// paint (when no wrapped layout is cached yet).
-    fn move_vertical(&mut self, dir: i32) -> usize {
-        if self.last_paint_gen != self.content_gen || self.wrapped.is_empty() {
+    fn move_vertical(&mut self, dir: i32, window: &Window) -> usize {
+        if !self.layout_current(window) || self.layout.wrapped.is_empty() {
             return self.vertical_offset(dir);
         }
         let (row, col) = self.row_col(self.cursor_offset());
@@ -4729,13 +4873,14 @@ impl EditorState {
             return self.vertical_offset(dir);
         }
         let Some(cur) = self
+            .layout
             .wrapped
             .get(row)
             .and_then(|l| line_pos(l, self.bidi_map(row), self.display_col(row, col), cur_lh))
         else {
             return self.vertical_offset(dir);
         };
-        let global_y = self.line_tops[row] + cur.y;
+        let global_y = self.layout.line_tops[row] + cur.y;
         // The goal column is the caret's *visual* x, so it carries an RTL row's
         // right-align shift — the target row's shift comes off again below.
         // (Row insets stay out of it, as they always have.)
@@ -4753,8 +4898,8 @@ impl EditorState {
         if target_y < px(0.) {
             return 0;
         }
-        let last = self.wrapped.len() - 1;
-        let total = self.line_tops[last] + self.line_h(last) * self.row_span(last) as f32;
+        let last = self.layout.wrapped.len() - 1;
+        let total = self.layout.line_tops[last] + self.line_h(last) * self.row_span(last) as f32;
         if target_y >= total {
             // Landing at the very end would park the caret on a trailing
             // collapsed row (a hidden closing ``` fence) and reveal it — clamp
@@ -4770,9 +4915,9 @@ impl EditorState {
             };
         }
         let mut trow = last;
-        for i in 0..self.wrapped.len() {
+        for i in 0..self.layout.wrapped.len() {
             let h = self.line_h(i) * self.row_span(i) as f32;
-            if target_y < self.line_tops[i] + h {
+            if target_y < self.layout.line_tops[i] + h {
                 trow = i;
                 break;
             }
@@ -4781,13 +4926,14 @@ impl EditorState {
         // to no row, and the loop assigns it to the row *after* it — right going
         // down, but going up that strands the caret on the far side of the gap (e.g.
         // just below a table). Going up, target the row before the gap instead.
-        if dir < 0 && trow > 0 && target_y < self.line_tops[trow] {
+        if dir < 0 && trow > 0 && target_y < self.layout.line_tops[trow] {
             trow -= 1;
         }
         // A table separator (`|---|`) row isn't editable — skip past it (in the
         // direction of travel) so the caret lands on the header/body row rather
         // than dropping the whole table to raw source.
         if self
+            .layout
             .table_rows
             .get(trow)
             .and_then(Option::as_ref)
@@ -4798,7 +4944,7 @@ impl EditorState {
             } else {
                 trow.wrapping_sub(1)
             };
-            if skip < self.wrapped.len() {
+            if skip < self.layout.wrapped.len() {
                 trow = skip;
             }
         }
@@ -4809,7 +4955,7 @@ impl EditorState {
         if self.line_h(trow) <= px(0.) {
             let step = |r: usize| {
                 if dir >= 0 {
-                    (r + 1 < self.wrapped.len()).then_some(r + 1)
+                    (r + 1 < self.layout.wrapped.len()).then_some(r + 1)
                 } else {
                     r.checked_sub(1)
                 }
@@ -4828,10 +4974,10 @@ impl EditorState {
         }
         let rel = point(
             (goal - self.rtl_shift(trow)).max(px(0.)),
-            (target_y - self.line_tops[trow]).max(px(0.)),
+            (target_y - self.layout.line_tops[trow]).max(px(0.)),
         );
         let col = line_index_at(
-            &self.wrapped[trow],
+            &self.layout.wrapped[trow],
             self.bidi_map(trow),
             rel,
             self.line_h(trow),
@@ -4927,26 +5073,20 @@ impl EditorState {
     /// The `src` of a file chip on the row at window `position`, if that row is a
     /// chip (from the last paint) — left-click opens it, right-click edits.
     fn chip_at(&self, position: Point<Pixels>) -> Option<(SharedString, bool)> {
-        if self.wrapped.is_empty() || self.chip_rows.iter().all(Option::is_none) {
+        if self.layout.wrapped.is_empty() {
             return None;
         }
-        let bounds = self.last_bounds.as_ref()?;
+        let bounds = self.layout.last_bounds.as_ref()?;
         let rel_y = position.y - bounds.top();
-        let mut row = self.wrapped.len() - 1;
-        for i in 0..self.wrapped.len() {
-            let h = self.line_h(i) * self.row_span(i) as f32;
-            if rel_y < self.line_tops[i] + h {
-                row = i;
-                break;
-            }
-        }
-        self.chip_rows.get(row).and_then(Option::clone)
+        let row = self.row_at_y(rel_y);
+        self.layout.chip_rows.get(row).and_then(Option::clone)
     }
 
     /// The inline `$…$` formula under `position` (its absolute byte range + inner LaTeX), from
     /// the last paint's window-space `inline_math_rects` — so a click opens its editor.
     fn inline_math_at(&self, position: Point<Pixels>) -> Option<(Range<usize>, SharedString)> {
-        self.inline_math_rects
+        self.layout
+            .inline_math_rects
             .iter()
             // Empty latex marks an inline IMAGE sharing this machinery — not a
             // formula, so a click on it shouldn't open the math editor.
@@ -4958,6 +5098,7 @@ impl EditorState {
     /// `inline_math_rects`), parsed from its `![alt](src)` source.
     fn inline_image_at(&self, position: Point<Pixels>) -> Option<SharedString> {
         let (range, _, _) = self
+            .layout
             .inline_math_rects
             .iter()
             .find(|(_, latex, rect)| latex.is_empty() && rect.contains(&position))?;
@@ -4973,7 +5114,7 @@ impl EditorState {
     /// each image's painted corner (see [`Self::image_grip`]); checked against the
     /// last paint's window-space `image_rects`.
     fn grip_at(&self, position: Point<Pixels>) -> Option<(usize, f32)> {
-        self.image_rects.iter().find_map(|&(line, rect)| {
+        self.layout.image_rects.iter().find_map(|&(line, rect)| {
             Self::image_grip(rect)
                 .contains(&position)
                 .then_some((line, f32::from(rect.size.width)))
@@ -5021,7 +5162,7 @@ impl EditorState {
     /// `(on_copy, fence_row)` — `true` = the Copy button, `false` = the
     /// language tag.
     fn code_chip_at(&self, position: Point<Pixels>) -> Option<(bool, usize)> {
-        self.code_chip_rects.iter().find_map(|c| {
+        self.layout.code_chip_rects.iter().find_map(|c| {
             if c.copy.contains(&position) {
                 Some((true, c.fence_row))
             } else if !self.code_langs.is_empty() && c.lang.contains(&position) {
@@ -5058,7 +5199,7 @@ impl EditorState {
 
     fn checkbox_at(&self, position: Point<Pixels>) -> Option<usize> {
         let pad = px(4.);
-        self.checkbox_rects.iter().find_map(|&(line, rect)| {
+        self.layout.checkbox_rects.iter().find_map(|&(line, rect)| {
             Bounds::new(
                 point(rect.origin.x - pad, rect.origin.y - pad),
                 size(rect.size.width + pad * 2., rect.size.height + pad * 2.),
@@ -5073,14 +5214,38 @@ impl EditorState {
     /// like the task checkbox to stay easy to hit.
     fn alert_fold_at(&self, position: Point<Pixels>) -> Option<usize> {
         let pad = px(4.);
-        self.alert_fold_rects.iter().find_map(|&(line, rect)| {
-            Bounds::new(
-                point(rect.origin.x - pad, rect.origin.y - pad),
-                size(rect.size.width + pad * 2., rect.size.height + pad * 2.),
-            )
-            .contains(&position)
-            .then_some(line)
-        })
+        self.layout
+            .alert_fold_rects
+            .iter()
+            .find_map(|&(line, rect)| {
+                Bounds::new(
+                    point(rect.origin.x - pad, rect.origin.y - pad),
+                    size(rect.size.width + pad * 2., rect.size.height + pad * 2.),
+                )
+                .contains(&position)
+                .then_some(line)
+            })
+    }
+
+    fn source_at_point(&self, point: Point<Pixels>, window: &mut Window) -> usize {
+        self.table_offset_at(point, window)
+            .unwrap_or_else(|| self.index_for_mouse_position(point))
+    }
+
+    /// First row whose bottom lies below the pointer, clamped at the last row.
+    /// Callers have a nonempty publication. Collapsed rows have zero height.
+    fn row_at_y(&self, y: Pixels) -> usize {
+        let mut rows = 0..self.layout.line_tops.len();
+        // Include inter-row padding with the following row, as in paint.
+        while rows.start < rows.end {
+            let i = rows.start + (rows.end - rows.start) / 2;
+            if self.layout.line_tops[i] + self.line_h(i) * self.row_span(i) as f32 <= y {
+                rows.start = i + 1;
+            } else {
+                rows.end = i;
+            }
+        }
+        rows.start.min(self.layout.line_tops.len() - 1)
     }
 
     /// If `position` lands on a heading's fold chevron painted last frame,
@@ -5088,56 +5253,57 @@ impl EditorState {
     /// like the callout chevron.
     fn heading_fold_at(&self, position: Point<Pixels>) -> Option<usize> {
         let pad = px(4.);
-        self.heading_fold_rects.iter().find_map(|&(line, rect)| {
-            Bounds::new(
-                point(rect.origin.x - pad, rect.origin.y - pad),
-                size(rect.size.width + pad * 2., rect.size.height + pad * 2.),
-            )
-            .contains(&position)
-            .then_some(line)
-        })
+        self.layout
+            .heading_fold_rects
+            .iter()
+            .find_map(|&(line, rect)| {
+                Bounds::new(
+                    point(rect.origin.x - pad, rect.origin.y - pad),
+                    size(rect.size.width + pad * 2., rect.size.height + pad * 2.),
+                )
+                .contains(&position)
+                .then_some(line)
+            })
     }
 
     fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
-        if self.content.is_empty() || self.wrapped.is_empty() {
+        if self.content.is_empty() || self.layout.wrapped.is_empty() {
             return 0;
         }
-        let Some(bounds) = self.last_bounds.as_ref() else {
+        let Some(bounds) = self.layout.last_bounds.as_ref() else {
             return 0;
         };
         let rel = point(position.x - bounds.left(), position.y - bounds.top());
         // Which logical line, by the vertical band each occupies (variable height).
-        let mut row = self.wrapped.len() - 1;
-        for i in 0..self.wrapped.len() {
-            let height = self.line_h(i) * self.row_span(i) as f32;
-            if rel.y < self.line_tops[i] + height {
-                row = i;
-                break;
-            }
-        }
+        let row = self.row_at_y(rel.y);
         let Some(&start) = self.line_starts().get(row) else {
             return self.content.len();
         };
         // An inline-image row: clicking it puts the caret at the line start (the
         // line then shows its source — "raw on caret"), not a text column.
-        if self.widget_rows.get(row).copied().unwrap_or(false) {
+        if self.layout.widget_rows.get(row).copied().unwrap_or(false) {
             return start;
         }
         // A click on a painted list marker enters its actual source. Clicks
         // on later wraps still target the body. Checkboxes retain their toggle.
         if rel.x < self.row_origin_x(row)
-            && rel.y >= self.line_tops[row]
-            && rel.y < self.line_tops[row] + self.line_h(row)
+            && rel.y >= self.layout.line_tops[row]
+            && rel.y < self.layout.line_tops[row] + self.line_h(row)
             && self.bidi_map(row).is_none()
             && let Some((prefix, indent, ..)) = markdown_syntax::list_prefix(self.line_str(row))
-            && self.offset_maps.get(row).and_then(Option::as_ref).is_some_and(|map| map.first() == Some(&prefix))
+            && self
+                .layout
+                .offset_maps
+                .get(row)
+                .and_then(Option::as_ref)
+                .is_some_and(|map| map.first() == Some(&prefix))
         {
             return start + indent;
         }
         let x = (rel.x - self.row_origin_x(row)).max(px(0.));
-        let line_rel = point(x, rel.y - self.line_tops[row]);
+        let line_rel = point(x, rel.y - self.layout.line_tops[row]);
         let col = line_index_at(
-            &self.wrapped[row],
+            &self.layout.wrapped[row],
             self.bidi_map(row),
             line_rel,
             self.line_h(row),
@@ -5149,7 +5315,7 @@ impl EditorState {
     /// unless the row's markers are hidden (W6), where the painted text is
     /// shorter than the source.
     fn source_col(&self, row: usize, display_col: usize) -> usize {
-        match self.offset_maps.get(row).and_then(Option::as_ref) {
+        match self.layout.offset_maps.get(row).and_then(Option::as_ref) {
             Some(map) => map.get(display_col).copied().unwrap_or(display_col),
             None => display_col,
         }
@@ -5161,7 +5327,7 @@ impl EditorState {
     /// has this frame's fresh map should call [`display_col_in`] directly.
     fn display_col(&self, row: usize, source_col: usize) -> usize {
         display_col_in(
-            self.offset_maps.get(row).and_then(Option::as_ref),
+            self.layout.offset_maps.get(row).and_then(Option::as_ref),
             source_col,
         )
     }
@@ -5262,7 +5428,12 @@ impl EditorState {
             }
             let (row, col) = self.row_col(off);
             if row != row0
-                || self.offset_maps.get(row).and_then(Option::as_ref).is_none()
+                || self
+                    .layout
+                    .offset_maps
+                    .get(row)
+                    .and_then(Option::as_ref)
+                    .is_none()
                 || self.display_col(row, col) != d0
             {
                 return off;
@@ -5289,7 +5460,12 @@ impl EditorState {
             }
             let (row, col) = self.row_col(off);
             if row != row0
-                || self.offset_maps.get(row).and_then(Option::as_ref).is_none()
+                || self
+                    .layout
+                    .offset_maps
+                    .get(row)
+                    .and_then(Option::as_ref)
+                    .is_none()
                 || self.display_col(row, col) != d0
             {
                 return off;
@@ -5502,43 +5678,53 @@ impl EntityInputHandler for EditorState {
         &mut self,
         range_utf16: Range<usize>,
         bounds: Bounds<Pixels>,
-        _: &mut Window,
+        window: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        if !self.layout_current(window) || self.layout.last_bounds != Some(bounds) {
+            return None;
+        }
         let range = self.range_from_utf16(&range_utf16);
-        let (row, col) = self.row_col(range.start);
-        let lh = self.line_h(row);
-        let line = self.wrapped.get(row)?;
-        let map = self.bidi_map(row);
-        let p = line_pos(line, map, self.display_col(row, col), lh)?;
-        let top = bounds.top() + self.line_tops.get(row).copied().unwrap_or(px(0.)) + p.y;
-        let x = bounds.left() + p.x + self.row_origin_x(row);
-        // Span the whole range when it stays on one wrap row (the common IME
-        // composition), so the candidate window anchors under the marked TEXT
-        // rather than a zero-width bar at its start. Multi-row ranges keep the
-        // start-anchored bar.
-        let (erow, ecol) = self.row_col(range.end);
-        let x2 = if erow == row && range.end > range.start {
-            line_pos(line, map, self.display_col(row, ecol), lh)
-                .filter(|e| e.y == p.y)
-                .map(|e| bounds.left() + e.x + self.row_origin_x(row))
-                .unwrap_or(x)
-        } else {
-            x
+        let caret = |offset, window: &mut Window| {
+            let (row, col) = self.row_col(offset);
+            if let Some(t) = self.layout.table_rows.get(row)?.as_ref() {
+                let (x, dy, ..) = table_caret_pos(
+                    t,
+                    col,
+                    self.table_left(t, row, &bounds),
+                    self.layout.font_size,
+                    window,
+                )?;
+                let y = bounds.top() + self.layout.line_tops[row] + px(6.) + dy;
+                return Some(Bounds::new(
+                    point(x, y),
+                    size(px(0.), self.layout.font_size * LINE_HEIGHT_RATIO),
+                ));
+            }
+            self.bounds_for_offset(offset)
         };
-        Some(Bounds::from_corners(
-            point(x, top),
-            point(x2.max(x), top + lh),
-        ))
+        let mut start = caret(range.start, window)?;
+        if range.end > range.start
+            && let Some(end) = caret(range.end, window)
+            && start.top() == end.top()
+        {
+            let left = start.left().min(end.left());
+            start.size.width = (end.left() - start.left()).abs();
+            start.origin.x = left;
+        }
+        Some(start)
     }
 
     fn character_index_for_point(
         &mut self,
         point: Point<Pixels>,
-        _: &mut Window,
+        window: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<usize> {
-        Some(self.offset_to_utf16(self.index_for_mouse_position(point)))
+        if !self.layout_current(window) {
+            return None;
+        }
+        Some(self.offset_to_utf16(self.source_at_point(point, window)))
     }
 }
 
@@ -6885,7 +7071,7 @@ fn set_image_width(line: &str, width: u32) -> String {
 /// map is ascending, so a source column that is hidden (a collapsed marker)
 /// snaps to the next visible display column. `None` map → identity (a row shown
 /// as full source). The prepaint cursor/selection pass this frame's fresh map
-/// (the committed `EditorState::offset_maps` lags a frame); event handlers go
+/// (the committed `PublishedLayout::offset_maps` lags a frame); event handlers go
 /// through [`EditorState::display_col`], which uses the committed map.
 fn display_col_in(map: Option<&std::rc::Rc<Vec<usize>>>, source_col: usize) -> usize {
     match map {
@@ -6896,6 +7082,22 @@ fn display_col_in(map: Option<&std::rc::Rc<Vec<usize>>>, source_col: usize) -> u
         Some(m) => m.partition_point(|&s| s < source_col),
         None => source_col,
     }
+}
+
+/// Screen-space caret on an ordinary shaped row, centered with the painted text.
+fn projected_caret_bounds(
+    line: &WrappedLine,
+    bidi: Option<&RtlRow>,
+    display_col: usize,
+    origin: Point<Pixels>,
+    height: Pixels,
+) -> Option<Bounds<Pixels>> {
+    let pos = line_pos(line, bidi, display_col, height)?;
+    let text_height = (line.unwrapped_layout.font_size * LINE_HEIGHT_RATIO).min(height);
+    Some(Bounds::new(
+        origin + pos + point(px(0.), (height - text_height) / 2.),
+        size(px(0.), text_height),
+    ))
 }
 
 /// The painted position of display column `dcol` on a shaped line: gpui's own
@@ -7254,6 +7456,9 @@ pub(crate) struct ScanData {
 /// mismatch (e.g. the resolved width differs from the available width)
 /// falls back to shaping.
 struct ShapeMemo {
+    stamp: LayoutStamp,
+    font: Font,
+    color: Hsla,
     wrap_width: Option<Pixels>,
     caret_row: Option<usize>,
     selection: (usize, usize),
@@ -7673,3 +7878,6 @@ mod tests {
 
 #[cfg(test)]
 mod remediation_tests;
+
+#[cfg(test)]
+mod layout_tests;

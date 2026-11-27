@@ -72,6 +72,7 @@ pub struct Workspace {
     resizing: bool,
     next_external_check: Instant,
     tree_scroll: UniformListScrollHandle,
+    document_scroll: ScrollHandle,
     dialog_busy: bool,
     sidebar: bool,
     vault: Option<Vault>,
@@ -153,6 +154,7 @@ impl Workspace {
             resizing: false,
             next_external_check: Instant::now(),
             tree_scroll: UniformListScrollHandle::default(),
+            document_scroll: ScrollHandle::new(),
             dialog_busy: false,
             sidebar: session.sidebar_visible,
             vault,
@@ -277,6 +279,7 @@ impl Workspace {
                 let editor = cx.new(|cx| {
                     let mut e = EditorState::new(window, cx)
                         .with_source_navigation()
+                        .with_viewport_scroll(self.document_scroll.clone())
                         .with_text(doc.text.clone());
                     e.set_markdown_style(crate::theme::markdown_style(), cx);
                     let images = self.images.clone();
@@ -915,8 +918,15 @@ impl Workspace {
         }
         cx.notify();
     }
+    fn refresh_document_layout(&self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.tabs.get(self.active).and_then(Tab::editor) {
+            editor.update(cx, |e, cx| e.refresh_layout(cx));
+        }
+    }
+
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.sidebar = !self.sidebar;
+        self.refresh_document_layout(cx);
         self.persist();
         cx.notify();
     }
@@ -1537,6 +1547,7 @@ impl Render for Workspace {
         } else if let Some(editor) = editor {
             div()
                 .id("document")
+                .track_scroll(&self.document_scroll)
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
@@ -1637,6 +1648,7 @@ impl Render for Workspace {
                 }
                 if s.resizing {
                     s.sidebar_width = f32::from(e.position.x).clamp(190., 380.);
+                    s.refresh_document_layout(cx);
                     cx.notify();
                 }
             }))

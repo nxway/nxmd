@@ -471,7 +471,7 @@ fn scrolled_highlights_align_with_source_after_edit(cx: &mut gpui::TestAppContex
     };
     draw(cx);
     view.update(cx, |v, _, cx| {
-        let top = v.editor.read(cx).line_tops[699];
+        let top = v.editor.read(cx).layout.line_tops[699];
         v.scroll.set_offset(point(px(0.), -top));
     })
     .unwrap();

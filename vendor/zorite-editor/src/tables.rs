@@ -9,16 +9,19 @@ impl EditorState {
     /// `None` off every table. Drives `on_mouse_move`'s repaint-on-change.
     pub(crate) fn table_hover_region_at(&self, pos: Point<Pixels>) -> Option<(usize, u8)> {
         let i = self
+            .layout
             .table_hover_zones
             .iter()
             .position(|(z, _)| z.contains(&pos))?;
         let strip = if self
+            .layout
             .table_row_add_rects
             .iter()
             .any(|(b, _)| b.contains(&pos))
         {
             1
         } else if self
+            .layout
             .table_col_add_rects
             .iter()
             .any(|(b, _, _)| b.contains(&pos))
@@ -60,7 +63,7 @@ impl EditorState {
     pub(crate) fn on_scroll_wheel(
         &mut self,
         event: &gpui::ScrollWheelEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Vertical scrolling is the overwhelmingly common case — bail before
@@ -69,11 +72,11 @@ impl EditorState {
         if std::env::var_os("ZORITE_WHEEL_DEBUG").is_some() {
             eprintln!("wheel: delta={:?} dx={dx}", event.delta);
         }
-        if dx == 0. {
+        if dx == 0. || !self.layout_current(window) {
             return;
         }
         let dbg = std::env::var_os("ZORITE_WHEEL_DEBUG").is_some();
-        let Some(bounds) = self.last_bounds else {
+        let Some(bounds) = self.layout.last_bounds else {
             return;
         };
         // Hit-test the PAINTED table zone (grid + margin, from the last
@@ -81,6 +84,7 @@ impl EditorState {
         // logical rows (top gutter, cell padding), which left the lower rows
         // of a tall table unresponsive to the wheel.
         let Some(&(_, header)) = self
+            .layout
             .table_hover_zones
             .iter()
             .find(|(z, _)| z.contains(&event.position))
@@ -96,7 +100,7 @@ impl EditorState {
         if dx.abs() >= f32::from(event.delta.pixel_delta(px(20.)).y).abs() {
             cx.stop_propagation();
         }
-        let Some(t) = self.table_rows.get(header).and_then(Option::as_ref) else {
+        let Some(t) = self.layout.table_rows.get(header).and_then(Option::as_ref) else {
             return;
         };
         if t.col_widths.is_empty() {
@@ -116,6 +120,7 @@ impl EditorState {
         // so the same physical swipe moves its content the same physical way.
         let new = if t.rtl { cur + dx } else { cur - dx }.clamp(0., max);
         if new != cur {
+            self.invalidate_presentation();
             self.table_scroll_x.insert(header, new);
             cx.notify();
         }
@@ -123,7 +128,7 @@ impl EditorState {
 
     /// drives the delete-handle repaint + reveal.
     pub(crate) fn hovered_table_cell(&self, pos: Point<Pixels>) -> Option<(usize, usize)> {
-        let bounds = self.last_bounds.as_ref()?;
+        let bounds = self.layout.last_bounds.as_ref()?;
         // Hover bands start at the left gutter and extend a header's band up into the
         // top gutter, so moving onto a delete handle keeps its cell "hovered".
         let gutter_left = bounds.left();
@@ -132,8 +137,8 @@ impl EditorState {
         }
         let rel_y = pos.y - bounds.top();
         let g = px(TABLE_GUTTER);
-        let row = (0..self.wrapped.len()).find(|&i| {
-            let Some(t) = self.table_rows.get(i).and_then(Option::as_ref) else {
+        let row = (0..self.layout.wrapped.len()).find(|&i| {
+            let Some(t) = self.layout.table_rows.get(i).and_then(Option::as_ref) else {
                 return false;
             };
             if t.is_separator {
@@ -141,13 +146,13 @@ impl EditorState {
             }
             let h = self.line_h(i) * self.row_span(i) as f32;
             let lo = if t.is_header {
-                self.line_tops[i] - g
+                self.layout.line_tops[i] - g
             } else {
-                self.line_tops[i]
+                self.layout.line_tops[i]
             };
-            rel_y >= lo && rel_y < self.line_tops[i] + h
+            rel_y >= lo && rel_y < self.layout.line_tops[i] + h
         })?;
-        let t = self.table_rows.get(row).and_then(Option::as_ref)?;
+        let t = self.layout.table_rows.get(row).and_then(Option::as_ref)?;
         if t.col_widths.is_empty() {
             return None;
         }
@@ -169,7 +174,8 @@ impl EditorState {
 
     /// Hit-test the hovered row's border "+" → the row a new row lands after.
     pub(crate) fn table_add_row_at(&self, position: Point<Pixels>) -> Option<usize> {
-        self.table_row_add_rects
+        self.layout
+            .table_row_add_rects
             .iter()
             .find_map(|&(rect, row)| rect.contains(&position).then_some(row))
     }
@@ -177,7 +183,8 @@ impl EditorState {
     /// Hit-test the hovered column's border "+" → `(header row, column)` — a new
     /// column lands right of it.
     pub(crate) fn table_add_col_at(&self, position: Point<Pixels>) -> Option<(usize, usize)> {
-        self.table_col_add_rects
+        self.layout
+            .table_col_add_rects
             .iter()
             .find_map(|&(rect, row, col)| rect.contains(&position).then_some((row, col)))
     }
@@ -197,26 +204,16 @@ impl EditorState {
         position: Point<Pixels>,
         window: &mut Window,
     ) -> Option<usize> {
-        if self.last_paint_gen != self.content_gen
-            || self.wrapped.is_empty()
-            || self.table_rows.iter().all(Option::is_none)
-        {
+        if !self.layout_current(window) || self.layout.wrapped.is_empty() {
             return None;
         }
-        let bounds = self.last_bounds.as_ref()?;
+        let bounds = self.layout.last_bounds.as_ref()?;
         let rel = point(
             position.x - bounds.left() - px(TABLE_GUTTER),
             position.y - bounds.top(),
         );
-        let mut row = self.wrapped.len() - 1;
-        for i in 0..self.wrapped.len() {
-            let h = self.line_h(i) * self.row_span(i) as f32;
-            if rel.y < self.line_tops[i] + h {
-                row = i;
-                break;
-            }
-        }
-        let t = self.table_rows.get(row).and_then(Option::as_ref)?;
+        let row = self.row_at_y(rel.y);
+        let t = self.layout.table_rows.get(row).and_then(Option::as_ref)?;
         if t.is_separator || t.col_widths.is_empty() {
             return None;
         }
@@ -224,7 +221,7 @@ impl EditorState {
         let rel = point(position.x - self.table_left(t, row, bounds), rel.y);
         // Measure at the last paint's font + size — the style stack is unwound
         // during event dispatch, so `text_style()` here reports the root style.
-        let font_size = self.font_size;
+        let font_size = self.layout.font_size;
         let pad = px(TABLE_CELL_PAD);
         // Column the click is in, and its left x — through the same mirrored
         // mapping the cells were painted with, or a click lands in a different
@@ -246,9 +243,9 @@ impl EditorState {
         let cx = col_offset(&t.col_widths, t.cells.len(), cell, t.rtl);
         let content = t.projected.get(cell)?;
         let cw = cell_span_width(&t.col_widths, t.cells.len(), cell);
-        let avail = (cw - pad * 2.).max(px(1.));
+        let avail = (cw - pad * 2.).max(px(8.));
         let shaped = shape_cell(window, content, font_size, Some(avail))?;
-        let row_y = (rel.y - self.line_tops[row] - px(6.)).max(px(0.));
+        let row_y = (rel.y - self.layout.line_tops[row] - px(6.)).max(px(0.));
         let align_off = cell_alignment_offset(
             &shaped,
             row_y,
@@ -261,9 +258,9 @@ impl EditorState {
         let pad_y = px(6.);
         let target = point(
             (rel.x - cx - pad - align_off).max(px(0.)),
-            rel.y - self.line_tops[row] - pad_y,
+            rel.y - self.layout.line_tops[row] - pad_y,
         );
-        let in_cell = cell_offset_for_point(content, target, avail, font_size, window);
+        let in_cell = cell_offset_for_point(content, &shaped, target, font_size);
         Some(self.line_starts()[row] + t.cell_ranges.get(cell)?.start + in_cell)
     }
 
@@ -279,8 +276,8 @@ impl EditorState {
     /// by more input before the next paint. An empty slice denotes the separator.
     fn navigation_cells(&self, row: usize) -> Option<std::borrow::Cow<'_, [Range<usize>]>> {
         use std::borrow::Cow;
-        if self.content_gen == self.last_paint_gen {
-            let t = self.table_rows.get(row)?.as_ref()?;
+        if self.has_current_rows() {
+            let t = self.layout.table_rows.get(row)?.as_ref()?;
             return Some(Cow::Borrowed(if t.is_separator {
                 &[]
             } else {
@@ -304,25 +301,21 @@ impl EditorState {
     /// Move within a wrapped cell before crossing to the adjacent table row.
     /// Use the same projected runs and alignment as paint and pointer hits.
     pub(crate) fn table_move_visual(&self, dir: i32, window: &mut Window) -> Option<usize> {
-        if self.content_gen != self.last_paint_gen {
+        if !self.layout_current(window) {
             return self.table_move_vertical(dir);
         }
         let (row, col) = self.row_col(self.cursor_offset());
-        let table = self.table_rows.get(row).and_then(Option::as_ref)?;
+        let table = self.layout.table_rows.get(row).and_then(Option::as_ref)?;
         if table.is_separator {
             return None;
         }
-        let font = self
-            .paint_font
-            .clone()
-            .unwrap_or_else(|| window.text_style().font());
-        let (x, y, cell, _) = table_caret_pos(table, col, px(0.), &font, self.font_size, window)?;
+        let (x, y, cell, _) = table_caret_pos(table, col, px(0.), self.layout.font_size, window)?;
         let projected = table.projected.get(cell)?;
         let width = (cell_span_width(&table.col_widths, table.cells.len(), cell)
             - px(TABLE_CELL_PAD * 2.))
         .max(px(8.));
-        let line = shape_cell(window, projected, self.font_size, Some(width))?;
-        let line_h = self.font_size * LINE_HEIGHT_RATIO;
+        let line = shape_cell(window, projected, self.layout.font_size, Some(width))?;
+        let line_h = self.layout.font_size * LINE_HEIGHT_RATIO;
         let target_y = y + line_h * dir as f32;
         if target_y >= px(0.) && target_y < line.size(line_h).height {
             let align =
@@ -330,13 +323,12 @@ impl EditorState {
             let cell_x = col_offset(&table.col_widths, table.cells.len(), cell, table.rtl);
             let source = cell_offset_for_point(
                 projected,
+                &line,
                 point(
                     x - cell_x - px(TABLE_CELL_PAD) - align,
                     target_y + line_h / 2.,
                 ),
-                width,
-                self.font_size,
-                window,
+                self.layout.font_size,
             );
             return Some(self.line_starts()[row] + table.cell_ranges[cell].start + source);
         }
@@ -468,7 +460,7 @@ impl EditorState {
     pub fn caret_table_align(&self) -> Option<CellAlign> {
         let (row, col) = self.row_col(self.cursor_offset());
         // Fast-reject via the paint: only a header row gets the toolbar.
-        let t = self.table_rows.get(row).and_then(Option::as_ref)?;
+        let t = self.layout.table_rows.get(row).and_then(Option::as_ref)?;
         if !t.is_header {
             return None;
         }
@@ -486,7 +478,7 @@ impl EditorState {
     /// `|---|` separator row; the caret stays put. No-op outside a table cell.
     pub fn set_caret_table_align(&mut self, align: CellAlign, cx: &mut Context<Self>) {
         let (row, col) = self.row_col(self.cursor_offset());
-        let Some(t) = self.table_rows.get(row).and_then(Option::as_ref) else {
+        let Some(t) = self.layout.table_rows.get(row).and_then(Option::as_ref) else {
             return;
         };
         if t.is_separator {
@@ -821,6 +813,7 @@ impl EditorState {
         // uses it, and the root font event dispatch reports has different
         // metrics (autofit widths were off by the family drift).
         let font = self
+            .layout
             .paint_font
             .clone()
             .unwrap_or_else(|| window.text_style().font());
@@ -829,7 +822,7 @@ impl EditorState {
             &region,
             window,
             &font,
-            self.font_size,
+            self.layout.font_size,
             Hsla::default(),
             None,
             None,
@@ -869,6 +862,7 @@ impl EditorState {
         };
         // The header row's committed display widths already carry the live drag.
         let Some(t) = self
+            .layout
             .table_rows
             .get(resize.header_row)
             .and_then(Option::as_ref)
@@ -1294,7 +1288,6 @@ pub(crate) fn table_caret_pos(
     t: &TableRow,
     col: usize,
     left: Pixels,
-    _font: &Font,
     font_size: Pixels,
     window: &mut Window,
 ) -> Option<(Pixels, Pixels, usize, usize)> {
@@ -1375,19 +1368,15 @@ pub(super) fn cell_alignment_offset(
 /// shaped line so it matches the kerned glyphs.
 fn cell_offset_for_point(
     content: &ProjectedCell,
+    wl: &WrappedLine,
     target: Point<Pixels>,
-    wrap: Pixels,
     font_size: Pixels,
-    window: &mut Window,
 ) -> usize {
     let line_h = font_size * LINE_HEIGHT_RATIO;
-    let Some(wl) = shape_cell(window, content, font_size, Some(wrap)) else {
-        return 0;
-    };
     let display = if wl.wrap_boundaries().is_empty()
         && zorite_markdown::syntax::contains_rtl(&content.text)
     {
-        gpui_bidi::shaped::map_of_wrapped(&wl, content.text.len()).index_for_x(f32::from(target.x))
+        gpui_bidi::shaped::map_of_wrapped(wl, content.text.len()).index_for_x(f32::from(target.x))
     } else {
         match wl.closest_index_for_position(
             point(

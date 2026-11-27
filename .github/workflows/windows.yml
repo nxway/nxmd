@@ -73,9 +73,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
-          # Reviewed main, immediately before the committed-edit consolidation.
-          run-id: 44846856388
-          name: nxmd-windows-x64-ded3da7ef0d4ad52e5ee90b4548aea532619e520
+          # Accepted Stage 1 main, before layout publication consolidation.
+          run-id: 46003654765
+          name: nxmd-windows-x64-bcd0f69d26e012397eec470b13f3cd96945eda59
           path: baseline-release
       - name: Compare native process metrics
         if: steps.baseline.outcome == 'success'
