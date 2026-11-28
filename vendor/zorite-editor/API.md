@@ -189,8 +189,7 @@ pub fn offset_screen_top(&self, offset: usize) -> Option<Pixels>
 ```
 
 The window-space top of the row containing byte `offset`, from the last
-layout — what a find bar needs to scroll a match into view. `None` before the
-first paint.
+compatible layout. It returns `None` while fresh row positions are pending.
 
 ## `fn find_in_source`
 
@@ -232,7 +231,7 @@ pub fn row_layout(&self) -> Vec<(Pixels, Pixels)>
 
 Per logical line, from the last paint: its top offset within the editor and
 its first wrap-row's height — enough for a host-drawn gutter (line numbers)
-to align with rows without re-deriving layout. Empty before the first paint.
+to align with rows without re-deriving layout. Empty until a compatible paint.
 Rows collapsed by a heading fold show no vertical advance (the next row's top
 equals theirs) — a gutter should skip those.
 
@@ -457,22 +456,31 @@ Focus the editor so it receives keyboard input (delegates to its
 pub fn bounds_for_offset(&self, offset: usize) -> Option<Bounds<Pixels>>
 ```
 
-The **window-space** caret box at `offset` (zero-width; the row's height) —
-for anchoring a popup (slash menu, toolbar) at a document position.
-
-**Returns** — `None` before the first paint, or if `offset`'s row isn't in the
-last paint's layout. Reads cached layout only — cheap; safe to call per frame.
+Returns a zero-width window-space caret box. Its height and vertical alignment
+follow the shaped text. Widget and table rows expose the actual published caret.
+An unavailable position or a stale publication returns `None`.
 
 #### `caret_screen_bounds`
 
-```rust
-pub fn caret_screen_bounds(&self) -> Option<Bounds<Pixels>>
-```
+Returns the painted caret’s vertical extent at the editor’s left edge. A caret move that reveals Markdown may
+need a new paint before this query can position a popup.
 
-The caret's own painted Y range in window space (anchored at the editor's left
-edge), or `None` before the first paint — for a host to scroll the caret into
-view. Computed from the layout stored at the last paint, so it's valid for
-caret moves that don't change the text (arrow keys, click).
+#### Host layout changes
+
+Supply the containing viewport's GPUI `ScrollHandle` with
+`with_viewport_scroll(handle.clone())` and attach the same handle to the
+scroll container. Call `refresh_layout(cx)` when changing the wrapper's
+allocation or inherited text metrics. Call `refresh_images(cx)` when an
+asynchronously resolved image can change row heights. These operations
+invalidate geometry and request a redraw without editing the document.
+
+The editor observes window resize, focus, and source and preedit revisions.
+While a compatible frame is pending, native hit tests return `None` and
+pointer handlers decline the interaction and request paint after an edit, resize,
+scroll, or resource change. During a selection-only reveal transition, the pointer
+continues to target the projection visible on screen until paint replaces it. Keyboard edits
+use source boundaries. Table movement can resolve cells from current Markdown.
+Visual bidi and wrap movement resumes with the new publication.
 
 #### `last_edit_was_keystroke`
 

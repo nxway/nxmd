@@ -12,6 +12,7 @@ pub(crate) struct EditorElement {
 
 pub(crate) struct PrepaintState {
     stamp: LayoutStamp,
+    line_insets: Vec<Pixels>,
     wrapped: Vec<WrappedLine>,
     /// Per-line wrap-row count (see [`PublishedLayout::wrap_rows`]).
     wrap_rows: Vec<usize>,
@@ -208,38 +209,8 @@ impl Element for EditorElement {
                     editor.shape_band.get().map(|(a, b)| (px(a), px(b))),
                     &editor.folded_headings,
                 );
-                // Mirror prepaint's `line_tops` walk exactly (same `line_pads`),
-                // or the element lays out shorter than it paints.
-                let (heights, backgrounds, tables, rows) = (
-                    &shaped.heights,
-                    &shaped.backgrounds,
-                    &shaped.tables,
-                    &shaped.wrap_rows,
-                );
-                let mut y = px(0.);
-                let mut needed = px(0.);
-                let mut new_tops: Vec<Pixels> = Vec::with_capacity(heights.len());
-                for (i, h) in heights.iter().enumerate() {
-                    let tbl = tables.get(i).and_then(Option::as_ref);
-                    let (top, bot) = line_pads(backgrounds[i], tbl);
-                    y += top;
-                    new_tops.push(y);
-                    let row_h = *h * rows[i] as f32;
-                    // A table's hover "+" add-row strip paints just below its
-                    // last row (see `TableAdds`). Keep that space inside the
-                    // element for a table near the document's end — outside
-                    // the element the strip's hitbox is masked off and its
-                    // clicks never reach the bounds-gated mouse handlers
-                    // (the add-column strip never has this problem: it
-                    // borrows horizontal space, which always exists).
-                    if let Some(t) = tbl
-                        && t.is_last
-                        && !t.col_widths.is_empty()
-                    {
-                        needed = needed.max(y + row_h + (*h * 0.75).max(px(12.)));
-                    }
-                    y += row_h + bot;
-                }
+                let new_tops = &shaped.line_tops;
+                let total = shaped.layout_height;
                 // Scroll anchoring (Cditor's anchor-restore): the SAME content
                 // generation as the last paint means no edit happened — so a
                 // height difference here is an ASYNC change (a math/mermaid/
@@ -249,7 +220,6 @@ impl Element for EditorElement {
                 // the delta to the host NOW (this measure runs before the
                 // scroll container places its children) so its scroll offset
                 // absorbs it in the same frame.
-                let total = y.max(base_lh).max(needed);
                 // ONLY at the real, final width: taffy also measures at
                 // intrinsic (None / min-content) widths, whose unwrapped
                 // heights diverge wildly from the wrapped layout at a narrow
@@ -379,6 +349,8 @@ impl Element for EditorElement {
                 && m.font_size == font_size
         });
         let ShapedDoc {
+            line_tops,
+            layout_height: _,
             wrapped,
             heights: line_heights,
             widgets,
@@ -414,7 +386,9 @@ impl Element for EditorElement {
                 wrap_rows: rows,
                 // The placeholder is the host's own string; no RTL layout.
                 rtl_rows: (0..n).map(|_| None).collect(),
+                ..Default::default()
             }
+            .position_rows(base_lh)
         } else {
             shape_document(
                 window,
@@ -452,24 +426,6 @@ impl Element for EditorElement {
             )
         };
 
-        // Top offset of each logical line (running sum of variable wrap heights),
-        // reserving a gap above/below each code block so its padded box has its
-        // own space (no overlap with the adjacent line, no blank line required).
-        let mut line_tops = Vec::with_capacity(wrapped.len());
-        let mut y = px(0.);
-        for (idx, lh) in line_heights.iter().enumerate() {
-            // Code-box pads plus the table gutter rows (see `line_pads`) — baked
-            // into line_tops so the caret / click / paint all shift with them,
-            // and neither table affordance overlaps the adjacent line.
-            let (top_pad, bot_pad) = line_pads(
-                backgrounds.get(idx).copied().flatten(),
-                tables.get(idx).and_then(Option::as_ref),
-            );
-            y += top_pad;
-            line_tops.push(y);
-            y += *lh * wrap_rows[idx] as f32 + bot_pad;
-        }
-
         // Include the row straddling the viewport top (it may be wrapped).
         let first_visible = line_tops
             .partition_point(|y| *y < -bounds.top())
@@ -489,15 +445,17 @@ impl Element for EditorElement {
         // had to be decided), turned into per-row right-align shifts. Rows are
         // shifted individually: a short last row sits further right than a full
         // one, which is what right-aligned text means.
+        let line_insets: Vec<_> = backgrounds
+            .iter()
+            .zip(&marks)
+            .map(|(bg, mark)| row_inset(*bg, *mark))
+            .collect();
         let rtl: Vec<Option<RtlRow>> = rtl_layout
             .into_iter()
             .enumerate()
             .map(|(i, entry)| {
                 let (base_rtl, rows) = entry?;
-                let inset = row_inset(
-                    backgrounds.get(i).copied().flatten(),
-                    marks.get(i).copied().flatten(),
-                );
+                let inset = line_insets[i];
                 let shifts = rows
                     .iter()
                     .map(|r| {
@@ -516,20 +474,8 @@ impl Element for EditorElement {
                 })
             })
             .collect();
-        // Row text origin, this frame: the row's inset plus its RTL shift.
-        // Fresh-data twin of `EditorState::row_origin_x` (the committed state
-        // lags a frame — see `disp_col` below).
-        let row_x = |row: usize| {
-            row_inset(
-                backgrounds.get(row).copied().flatten(),
-                marks.get(row).copied().flatten(),
-            ) + rtl
-                .get(row)
-                .and_then(Option::as_ref)
-                .and_then(|r| r.shifts.first().copied())
-                .unwrap_or(px(0.))
-        };
         let bidi = |row: usize| rtl.get(row).and_then(Option::as_ref);
+        let row_x = |row: usize| line_insets[row] + first_wrap_shift(bidi(row));
 
         // Corner-grip hitboxes for each inline image, in `widgets` order (matching
         // the order paint walks them) — hitboxes must be inserted during prepaint,
@@ -542,10 +488,7 @@ impl Element for EditorElement {
             if let Some(Block::Image(img)) = w
                 && img.resizable
             {
-                let inset = row_inset(
-                    backgrounds.get(i).copied().flatten(),
-                    marks.get(i).copied().flatten(),
-                );
+                let inset = line_insets[i];
                 let (img_w, img_h) = image_display_size(img, image_resize, i);
                 let img_bounds = Bounds::new(
                     point(
@@ -1386,6 +1329,7 @@ impl Element for EditorElement {
 
         PrepaintState {
             stamp: editor.layout_stamp(window),
+            line_insets,
             wrapped,
             wrap_rows,
             grip,
@@ -1908,10 +1852,7 @@ impl Element for EditorElement {
                 // Inline image (W4a): paint the decoded image instead of source,
                 // inset to the row's gutter so a list-item image sits past its
                 // bullet (painted above, like any list row).
-                let inset = row_inset(
-                    prepaint.backgrounds.get(i).copied().flatten(),
-                    prepaint.marks.get(i).copied().flatten(),
-                );
+                let inset = prepaint.line_insets[i];
                 // While this image's grip is being dragged, preview the live width
                 // (aspect-preserved from the saved size) instead of the saved
                 // `{width=N}` — the source isn't rewritten until release.
@@ -1987,10 +1928,7 @@ impl Element for EditorElement {
             } else {
                 // Code blocks + gutter marks inset their text (kept in sync with
                 // `EditorState::line_inset` / the fresh prepaint inset).
-                let inset = row_inset(
-                    prepaint.backgrounds.get(i).copied().flatten(),
-                    prepaint.marks.get(i).copied().flatten(),
-                );
+                let inset = prepaint.line_insets[i];
                 let text_origin = point(origin.x + inset + shift, origin.y);
                 if let Some(r) = rtl {
                     // Our own rows, painted in reading order — gpui's wrapping
@@ -2089,7 +2027,8 @@ impl Element for EditorElement {
         // otherwise only repaints on the caret blink). Zones are committed every
         // frame so on_mouse_move knows where the tables are.
         let mouse = window.mouse_position();
-        let table_hover_zones: Vec<(Bounds<Pixels>, usize)> = prepaint.table_zones.clone();
+        let table_hover_zones: Vec<(Bounds<Pixels>, usize)> =
+            std::mem::take(&mut prepaint.table_zones);
         let mut table_row_add_rects: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut table_col_add_rects: Vec<(Bounds<Pixels>, usize, usize)> = Vec::new();
         let mut table_row_del = None;
@@ -2212,7 +2151,7 @@ impl Element for EditorElement {
                     && hb.is_hovered(window)
                 {
                     editor.update(cx, |ed, cx| {
-                        if !ed.layout_current(window) {
+                        if ed.displayed_layout(window).is_none() {
                             return;
                         }
                         let (bs, be) = ed.drag_block_rows(row);
@@ -2238,7 +2177,8 @@ impl Element for EditorElement {
                 if phase == gpui::DispatchPhase::Bubble {
                     let ed = editor.read(cx);
                     let gr = ed
-                        .layout_current(_w)
+                        .displayed_layout(_w)
+                        .is_some()
                         .then(|| ed.grip_hover_row_at(e.position))
                         .flatten();
                     if gr != ed.grip_hover_row {
@@ -2260,7 +2200,7 @@ impl Element for EditorElement {
             window.on_mouse_event(move |e: &MouseMoveEvent, phase, _w, cx| {
                 if phase == gpui::DispatchPhase::Bubble {
                     editor.update(cx, |ed, cx| {
-                        if ed.layout_current(_w)
+                        if ed.displayed_layout(_w).is_some()
                             && let Some((bs, be, t)) = ed.line_drag
                         {
                             let b = ed.snap_drop_boundary(ed.drop_boundary_at(e.position));
@@ -2296,12 +2236,7 @@ impl Element for EditorElement {
             .map(|(i, w)| w.is_some() || prepaint.tables.get(i).is_some_and(Option::is_some))
             .collect();
         let table_rows = std::mem::take(&mut prepaint.tables);
-        let line_insets: Vec<Pixels> = prepaint
-            .backgrounds
-            .iter()
-            .zip(prepaint.marks.iter())
-            .map(|(bg, mark)| row_inset(*bg, *mark))
-            .collect();
+        let line_insets = std::mem::take(&mut prepaint.line_insets);
         let chip_rows: Vec<Option<(SharedString, bool)>> = prepaint
             .widgets
             .iter()
@@ -3031,8 +2966,8 @@ fn shape_document(
     for (idx, &line_start) in starts.iter().enumerate() {
         let line = editor.line_str(idx);
         let line_end = line_start + line.len();
-        // Running top of this line — mirrors the prepaint `line_tops` walk
-        // (including `line_pads`) so the band test is exact.
+        // Estimate for the windowed shaping decision. Final positions also include
+        // code-box end caps resolved after scanning the closing fence.
         if idx > 0 {
             let (tp, bp) = line_pads(out.backgrounds[idx - 1], out.tables[idx - 1].as_ref());
             y_acc += tp + bp + out.heights[idx - 1] * out.wrap_rows[idx - 1] as f32;
@@ -4091,7 +4026,32 @@ fn shape_document(
             lh.clear();
         }
     }
-    out
+    out.position_rows(base_font_size * LINE_HEIGHT_RATIO)
+}
+
+impl ShapedDoc {
+    /// Resolve final row positions once, after code-block end caps and table
+    /// pads are known. Measure, scroll anchoring, prepaint and input all share
+    /// these offsets; the measure memo transfers the vector without copying.
+    fn position_rows(mut self, min_height: Pixels) -> Self {
+        self.line_tops.reserve(self.heights.len());
+        let mut y = px(0.);
+        let mut needed = min_height;
+        for (i, &height) in self.heights.iter().enumerate() {
+            let table = self.tables[i].as_ref();
+            let (above, below) = line_pads(self.backgrounds[i], table);
+            y += above;
+            self.line_tops.push(y);
+            y += height * self.wrap_rows[i] as f32;
+            // The trailing add-row strip must stay inside the element hitbox.
+            if table.is_some_and(|t| t.is_last && !t.col_widths.is_empty()) {
+                needed = needed.max(y + (height * 0.75).max(px(12.)));
+            }
+            y += below;
+        }
+        self.layout_height = y.max(needed);
+        self
+    }
 }
 
 /// Measure a property region's rows into a [`PropPanel`] with content-fit

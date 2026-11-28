@@ -1112,31 +1112,37 @@ impl EditorState {
         }
     }
 
-    fn layout_current(&self, window: &Window) -> bool {
-        self.layout.stamp.is_some_and(|stamp| {
-            stamp.viewport == window.viewport_size()
-                && stamp.scale == window.scale_factor()
-                && self.matches_display(
-                    stamp,
-                    self.reveal_inputs(self.focus_handle.is_focused(window)),
-                )
-        })
-    }
-
-    // Windowless host queries use the same comparison for all editor-owned
-    // inputs. Resize and focus observers withdraw these rows on window changes.
-    fn has_current_rows(&self) -> bool {
-        self.layout.stamp.is_some_and(|stamp| {
-            let current = self.reveal_inputs(stamp.reveal.is_some());
-            self.matches_display(stamp, current)
-        })
-    }
-
-    fn matches_display(&self, stamp: LayoutStamp, reveal: Option<(usize, usize, bool)>) -> bool {
+    fn matches_document_layout(&self, stamp: LayoutStamp) -> bool {
         stamp.display_revision == self.content_gen
             && stamp.presentation_revision == self.presentation_revision
             && stamp.scroll_offset == self.viewport_scroll.as_ref().map(ScrollHandle::offset)
-            && stamp.reveal == reveal
+    }
+
+    /// A pointer targets the pixels still on screen. A pending reveal changes
+    /// neither those pixels nor the source offsets they map to. Edits, resource
+    /// changes and viewport changes *do* withdraw that mapping immediately.
+    fn displayed_layout(&self, window: &Window) -> Option<LayoutStamp> {
+        self.layout.stamp.filter(|&stamp| {
+            stamp.viewport == window.viewport_size()
+                && stamp.scale == window.scale_factor()
+                && self.matches_document_layout(stamp)
+        })
+    }
+
+    /// Keyboard and IME queries describe the current caret, including any
+    /// reveal requested since the last paint.
+    fn layout_current(&self, window: &Window) -> bool {
+        self.displayed_layout(window).is_some_and(|stamp| {
+            stamp.reveal == self.reveal_inputs(self.focus_handle.is_focused(window))
+        })
+    }
+
+    // Resize and focus observers also withdraw windowless host queries.
+    fn has_current_rows(&self) -> bool {
+        self.layout.stamp.is_some_and(|stamp| {
+            self.matches_document_layout(stamp)
+                && stamp.reveal == self.reveal_inputs(stamp.reveal.is_some())
+        })
     }
 
     fn invalidate_presentation(&mut self) {
@@ -2026,12 +2032,7 @@ impl EditorState {
     /// The right-align shift of an RTL row (zero everywhere else) — see
     /// [`RtlRow::shift`].
     fn rtl_shift(&self, row: usize) -> Pixels {
-        self.layout
-            .rtl_rows
-            .get(row)
-            .and_then(Option::as_ref)
-            .and_then(|r| r.shifts.first().copied())
-            .unwrap_or(px(0.))
+        first_wrap_shift(self.bidi_map(row))
     }
 
     /// Where logical line `row`'s painted text actually starts: its inset plus
@@ -3457,7 +3458,7 @@ impl EditorState {
             cx.notify();
             return;
         }
-        if !self.layout_current(window) {
+        if self.displayed_layout(window).is_none() {
             cx.notify();
             return;
         }
@@ -3878,7 +3879,7 @@ impl EditorState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.layout_current(window) {
+        if self.displayed_layout(window).is_none() {
             cx.notify();
             return;
         }
@@ -4114,7 +4115,7 @@ impl EditorState {
             cx.notify();
             return;
         }
-        if !self.layout_current(window) {
+        if self.displayed_layout(window).is_none() {
             cx.notify();
             return;
         }
@@ -4739,7 +4740,9 @@ impl EditorState {
     /// The caret's bounds in window space (its painted Y range), or `None` before
     /// publication or while the displayed source or projection needs a new frame.
     pub fn caret_screen_bounds(&self) -> Option<Bounds<Pixels>> {
-        self.bounds_for_offset(self.cursor_offset())
+        let mut caret = self.bounds_for_offset(self.cursor_offset())?;
+        caret.origin.x = self.layout.last_bounds?.left();
+        Some(caret)
     }
 
     fn cursor_offset(&self) -> usize {
@@ -4852,12 +4855,17 @@ impl EditorState {
         }
         let target = target as usize;
         let target_start = starts[target];
-        let target_len = self.line_end(target) - target_start;
-        let mut new_col = col.min(target_len);
-        while new_col > 0 && !self.content.is_char_boundary(target_start + new_col) {
-            new_col -= 1;
+        let line = self.line_str(target);
+        if col >= line.len() {
+            return target_start + line.len();
         }
-        target_start + new_col
+        let boundary = line
+            .grapheme_indices(true)
+            .map(|(at, _)| at)
+            .take_while(|&at| at <= col)
+            .last()
+            .unwrap_or(0);
+        target_start + boundary
     }
 
     /// Offset one *visual* row up/down from the caret, preserving the goal column
@@ -6986,6 +6994,8 @@ impl LineMark {
 /// the only writers, so the lockstep invariant lives here.
 #[derive(Default)]
 struct ShapedDoc {
+    line_tops: Vec<Pixels>,
+    layout_height: Pixels,
     wrapped: Vec<WrappedLine>,
     heights: Vec<Pixels>,
     widgets: Vec<Option<Block>>,
@@ -7082,6 +7092,11 @@ fn display_col_in(map: Option<&std::rc::Rc<Vec<usize>>>, source_col: usize) -> u
         Some(m) => m.partition_point(|&s| s < source_col),
         None => source_col,
     }
+}
+
+fn first_wrap_shift(rtl: Option<&RtlRow>) -> Pixels {
+    rtl.and_then(|r| r.shifts.first().copied())
+        .unwrap_or(px(0.))
 }
 
 /// Screen-space caret on an ordinary shaped row, centered with the painted text.

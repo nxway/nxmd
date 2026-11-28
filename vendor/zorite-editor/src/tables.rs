@@ -72,7 +72,7 @@ impl EditorState {
         if std::env::var_os("ZORITE_WHEEL_DEBUG").is_some() {
             eprintln!("wheel: delta={:?} dx={dx}", event.delta);
         }
-        if dx == 0. || !self.layout_current(window) {
+        if dx == 0. || self.displayed_layout(window).is_none() {
             return;
         }
         let dbg = std::env::var_os("ZORITE_WHEEL_DEBUG").is_some();
@@ -204,7 +204,7 @@ impl EditorState {
         position: Point<Pixels>,
         window: &mut Window,
     ) -> Option<usize> {
-        if !self.layout_current(window) || self.layout.wrapped.is_empty() {
+        if self.displayed_layout(window).is_none() || self.layout.wrapped.is_empty() {
             return None;
         }
         let bounds = self.layout.last_bounds.as_ref()?;

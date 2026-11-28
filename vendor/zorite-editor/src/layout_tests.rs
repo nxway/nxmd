@@ -309,3 +309,69 @@ fn fresh_bidi_geometry_drives_visual_arrows(cx: &mut gpui::TestAppContext) {
     })
     .unwrap();
 }
+
+#[gpui::test]
+fn before_paint_vertical_fallback_lands_on_whole_grapheme(cx: &mut gpui::TestAppContext) {
+    let view = cx.open_window(size(px(400.), px(300.)), |w, cx| {
+        EditorState::new(w, cx).with_text("before\r\ne\u{301} suffix")
+    });
+    paint(view, cx);
+    view.update(cx, |e, w, cx| {
+        e.set_cursor(0, cx);
+        e.replace_text_in_range(None, "X", w, cx);
+        e.down(&Down, w, cx);
+        assert_eq!(e.cursor_offset(), e.line_starts()[1]);
+        e.right(&Right, w, cx);
+        assert_eq!(&e.text()[e.line_starts()[1]..e.cursor_offset()], "e\u{301}");
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn rapid_drag_tracks_the_projection_still_on_screen(cx: &mut gpui::TestAppContext) {
+    let source = "Привет **東京** café e\u{301} 👩🏽‍💻.\r\nnext";
+    let view = cx.open_window(size(px(650.), px(200.)), |w, cx| {
+        let mut e = EditorState::new(w, cx).with_text(source);
+        e.set_markdown_style(markdown_syntax::tests::test_style(), cx);
+        e.focus(w, cx);
+        e
+    });
+    paint(view, cx);
+    view.update(cx, |e, w, cx| {
+        let end = source.find('\r').unwrap();
+        let start = e.bounds_for_offset(0).unwrap().origin;
+        let mid = e
+            .bounds_for_offset(source.find('東').unwrap())
+            .unwrap()
+            .origin;
+        let finish = e.bounds_for_offset(end).unwrap().origin;
+        // The selection and its reveal intent change, but the pixels on screen
+        // (including the collapsed bold delimiters) have not changed.
+        e.select_to("При".len(), cx);
+        e.on_mouse_down(&press(start), w, cx);
+        for position in [mid, finish] {
+            e.on_mouse_move(
+                &MouseMoveEvent {
+                    position,
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Default::default(),
+                },
+                w,
+                cx,
+            );
+        }
+        e.on_mouse_up(
+            &MouseUpEvent {
+                position: finish,
+                button: MouseButton::Left,
+                click_count: 1,
+                modifiers: Default::default(),
+            },
+            w,
+            cx,
+        );
+        assert_eq!(e.selected_range, 0..end);
+        assert_eq!(&e.text()[e.selected_range.clone()], &source[..end]);
+    })
+    .unwrap();
+}
