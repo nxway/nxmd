@@ -452,21 +452,21 @@ impl EditorState {
         )
     }
 
+    fn caret_table_column(&self) -> Option<(usize, usize)> {
+        let (row, col) = self.row_col(self.cursor_offset());
+        let cells = self.navigation_cells(row)?;
+        (!cells.is_empty()).then(|| (row, table_cell_at(&cells, col)))
+    }
+
     /// The alignment of the table column the caret sits in — but only while the
     /// caret is in the table's HEADER row (the toolbar lives there; alignment is a
     /// per-column property, set once from the header). `None` otherwise. Read from
     /// the current content, since the painted `table_rows` lag a frame right after
     /// a separator rewrite (which would highlight the just-changed-from button).
     pub fn caret_table_align(&self) -> Option<CellAlign> {
-        let (row, col) = self.row_col(self.cursor_offset());
-        // Fast-reject via the paint: only a header row gets the toolbar.
-        let t = self.layout.table_rows.get(row).and_then(Option::as_ref)?;
-        if !t.is_header {
-            return None;
-        }
-        let cell = table_cell_at(&t.cell_ranges, col);
+        let (row, cell) = self.caret_table_column()?;
         let scan = self.scan_data();
-        let region = scan.tables.iter().find(|r| r.lines.contains(&row))?;
+        let region = scan.tables.iter().find(|r| r.lines.start == row)?;
         Some(match region.aligns.get(cell) {
             Some(markdown_syntax::Align::Center) => CellAlign::Center,
             Some(markdown_syntax::Align::Right) => CellAlign::Right,
@@ -477,16 +477,9 @@ impl EditorState {
     /// Set the alignment of the caret's table column by rewriting that table's
     /// `|---|` separator row; the caret stays put. No-op outside a table cell.
     pub fn set_caret_table_align(&mut self, align: CellAlign, cx: &mut Context<Self>) {
-        let (row, col) = self.row_col(self.cursor_offset());
-        let Some(t) = self.layout.table_rows.get(row).and_then(Option::as_ref) else {
+        let Some((row, cell)) = self.caret_table_column() else {
             return;
         };
-        if t.is_separator {
-            return;
-        }
-        let cell = table_cell_at(&t.cell_ranges, col);
-        // Read the table's columns from the current content (fresh), so repeated
-        // clicks build on the latest alignment, not a stale painted snapshot.
         let scan = self.scan_data();
         let Some(region) = scan.tables.iter().find(|r| r.lines.contains(&row)) else {
             return;

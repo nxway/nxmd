@@ -375,3 +375,24 @@ fn rapid_drag_tracks_the_projection_still_on_screen(cx: &mut gpui::TestAppContex
     })
     .unwrap();
 }
+
+#[gpui::test]
+fn table_alignment_after_a_rewrite_uses_current_cell_ranges(cx: &mut gpui::TestAppContext) {
+    let source = "| long first header | 東京 |\r\n| :-- | --: |\r\n| Ж | 2 |";
+    let view = cx.open_window(size(px(480.), px(240.)), |w, cx| {
+        let mut e = EditorState::new(w, cx).with_text(source);
+        e.set_markdown_style(markdown_syntax::tests::test_style(), cx);
+        e
+    });
+    paint(view, cx);
+    view.update(cx, |e, _, cx| {
+        let range = source.find("long first header").unwrap();
+        e.replace_range(range..range + "long first header".len(), "A", cx);
+        e.set_cursor(e.text().find('東').unwrap(), cx);
+        assert_eq!(e.caret_table_align(), Some(CellAlign::Right));
+        TableMenuAction::AlignCenter.apply(e, cx);
+        assert_eq!(e.text(), "| A | 東京 |\r\n| :-- | :-: |\r\n| Ж | 2 |");
+        assert_eq!(e.caret_table_align(), Some(CellAlign::Center));
+    })
+    .unwrap();
+}
